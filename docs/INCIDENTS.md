@@ -44,3 +44,10 @@ The first remote CI run passed all 43 SQLite tests and all 43 PostgreSQL tests, 
 formatting and JS syntax. Browser installation failed: ubuntu-latest had advanced to Ubuntu
 26.04, unsupported by the pinned Playwright version. Pinned the test runner to Ubuntu 24.04
 and Python 3.12. This is a setup failure, not a claimed passing UI test.
+
+## Docker smoke readiness
+
+The remote image built successfully. The first HTTP health probe encountered a connection
+reset while the newly launched container was starting; curl's original retry flags covered
+refused connections but not resets. Expanded retries for this idempotent readiness GET and
+added an exit trap to retain container logs and clean up. Startup/auth checks await the rerun.
