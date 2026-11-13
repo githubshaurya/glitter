@@ -1,5 +1,6 @@
 import json
 import time
+import uuid
 
 import httpx
 
@@ -15,8 +16,24 @@ For SELL: review the rule exit; required risk reduction remains an independent s
 For HOLD: return HOLD with NO_SIGNAL. Never propose another symbol, side or quantity.
 Use get_recent_candles only if necessary. Finish by calling submit_verdict exactly once.
 Cite feature names present in context (e.g. ema_spread, trend_4h, rsi_14, atr_pct, spread_bps).
+Do not infer liquidity, spread, marketability or execution safety from ATR/OHLC/volatility.
+When quotes or spread are unavailable, explicitly leave execution quality unknown. Cite only
+exact feature keys, not newly invented aliases. Describe higher-timeframe alignment as your
+entry-vetting criterion, not as a hard EMA rule requirement imposed by software.
 Give a short evidence-based explanation for the user, not a chain of private reasoning.
 Numeric risk limits, order sizing, broker submission, and halts are enforced outside you.
+"""
+
+COMMISSIONING_PROMPT = """You vet an operator-authorized PAPER-ONLY commissioning probe, not an investment.
+Read get_decision_context first. The maximum entry is $2 of simulated money and order sizing,
+account state, available holdings and all hard risk controls are checked separately in local code.
+No private account information is sent to you. Assess the supplied public market data and probe
+constraints. APPROVE a probe on BTC/USD if prices are valid, spread is no more than 50 bps and
+the explicit paper-only $2 constraint is present. Otherwise VETO or HOLD. A SELL is a proposed
+cleanup operation; local code independently prevents shorting or selling unrelated holdings.
+Finish with submit_verdict, cite exact provided feature names and give a short factual rationale.
+Allowed commissioning evidence also includes commissioning.paper_only and commissioning.maximum_entry_usd.
+Never describe this as a profitable signal, never change symbol, quantity, or the paper boundary.
 """
 
 
@@ -55,7 +72,9 @@ VERDICT_TOOL = tool(
 
 
 class AgentError(RuntimeError):
-    pass
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
 
 
 class GroqAgent:
@@ -95,25 +114,52 @@ class GroqAgent:
         except httpx.TransportError:
             raise AgentError("Groq transport failure") from None
         if not response.is_success:
-            raise AgentError(f"Groq HTTP {response.status_code}")
+            details = {
+                "status": response.status_code,
+                "request_id": response.headers.get("x-request-id"),
+            }
+            try:
+                provider_error = response.json().get("error", {})
+                details.update(
+                    {key: str(provider_error.get(key, ""))[:100] for key in ("code", "type")}
+                )
+            except (ValueError, AttributeError):
+                pass
+            # Do not retain failed_generation or arbitrary message fields: these may include
+            # provider-private reasoning. The request ID supports provider-side diagnosis.
+            raise AgentError(f"Groq HTTP {response.status_code}", details)
         try:
             body = response.json()
             raw = body["choices"][0]["message"]
             # Preserve model-visible message/tool calls, never private reasoning fields.
             message = {k: raw[k] for k in ("role", "content", "tool_calls") if k in raw}
-            return message, body.get("usage", {})
+            return (
+                message,
+                body.get("usage", {}),
+                {
+                    "id": body.get("id"),
+                    "model": body.get("model"),
+                    "system_fingerprint": body.get("system_fingerprint"),
+                    "request_id": response.headers.get("x-request-id"),
+                },
+            )
         except (ValueError, KeyError, IndexError, TypeError):
             raise AgentError("Invalid Groq response envelope") from None
 
-    def vet(self, observation):
+    def vet(self, observation, *, purpose="strategy"):
         candidate_id = observation["candidate"]["id"]
+        request_id = str(uuid.uuid4())
         start = time.monotonic()
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": COMMISSIONING_PROMPT if purpose == "commissioning" else SYSTEM_PROMPT,
+            },
             {"role": "user", "content": "Vet candidate " + candidate_id},
         ]
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         tools_used = []
+        provider_requests = []
         context_read = False
         try:
             if "account" in observation and not self.settings.agent_account_context_enabled:
@@ -132,18 +178,29 @@ class GroqAgent:
                 choice = (
                     "required" if turn == 1 else {"type": "function", "function": {"name": name}}
                 )
-                message, counts = self.complete(messages, available, choice)
+                turn_start = time.monotonic()
+                message, counts, provider = self.complete(messages, available, choice)
+                provider_requests.append(provider)
+                if not isinstance(counts, dict):
+                    raise AgentError("Invalid provider usage")
                 for key in usage:
-                    usage[key] += int(counts.get(key, 0))
+                    count = counts.get(key, 0)
+                    if type(count) is not int or count < 0:
+                        raise AgentError("Invalid provider token count")
+                    usage[key] += count
                 self.repository.event(
                     "agent_response",
-                    candidate_id,
+                    request_id,
                     {
                         "model": self.model,
                         "turn": turn,
                         "message": message,
                         "usage": counts,
                         "prompt_version": PROMPT_VERSION,
+                        "candidate_id": candidate_id,
+                        "purpose": purpose,
+                        "provider": provider,
+                        "latency_seconds": time.monotonic() - turn_start,
                     },
                 )
                 calls = message.get("tool_calls", [])
@@ -159,7 +216,75 @@ class GroqAgent:
                 if name == "get_decision_context":
                     if arguments != {"candidate_id": candidate_id}:
                         raise AgentError("Context candidate mismatch")
-                    result = {k: v for k, v in observation.items() if k != "candles"}
+                    result = {
+                        key: observation[key]
+                        for key in (
+                            "candidate",
+                            "cutoff",
+                            "observed_at",
+                            "source",
+                            "features",
+                            "quote",
+                            "account",
+                            "risk_policy",
+                            "control",
+                            "strategy_version",
+                            "prompt_version",
+                            "purpose",
+                            "commissioning",
+                            "scope",
+                        )
+                        if key in observation
+                    }
+                    if "account" in result:
+                        account = {
+                            key: result["account"][key]
+                            for key in (
+                                "equity",
+                                "cash",
+                                "buying_power",
+                                "blocked",
+                                "positions",
+                                "orders",
+                            )
+                            if key in result["account"]
+                        }
+                        account["positions"] = {
+                            symbol: {
+                                key: position[key]
+                                for key in (
+                                    "qty",
+                                    "qty_available",
+                                    "market_value",
+                                    "unrealized_plpc",
+                                )
+                                if key in position
+                            }
+                            for symbol, position in account.get("positions", {}).items()
+                        }
+                        account["orders"] = [
+                            {
+                                key: order[key]
+                                for key in (
+                                    "symbol",
+                                    "side",
+                                    "qty",
+                                    "notional",
+                                    "filled_qty",
+                                    "status",
+                                    "limit_price",
+                                )
+                                if key in order
+                            }
+                            for order in account.get("orders", [])
+                        ]
+                        result["account"] = account
+                    if "control" in result:
+                        result["control"] = {
+                            key: result["control"][key]
+                            for key in ("mode", "loss_latched")
+                            if key in result["control"]
+                        }
                     context_read = True
                 elif name == "get_recent_candles":
                     if (
@@ -173,12 +298,20 @@ class GroqAgent:
                     verdict = Verdict.model_validate(arguments)
                     if not context_read or verdict.candidate_id != candidate_id:
                         raise AgentError("Verdict candidate mismatch or context not read")
-                    if any(x not in observation["features"] for x in verdict.evidence):
+                    allowed_evidence = set(observation["features"])
+                    if purpose == "commissioning":
+                        allowed_evidence.update(
+                            {"commissioning.paper_only", "commissioning.maximum_entry_usd"}
+                        )
+                    if any(x not in allowed_evidence for x in verdict.evidence):
                         raise AgentError("Unknown evidence reference")
                     if observation["candidate"]["action"] == "HOLD" and verdict.verdict != "HOLD":
                         raise AgentError("No-signal candidates must HOLD")
-                    self.repository.event("agent_verdict", candidate_id, verdict.model_dump())
+                    self.repository.event("agent_verdict", request_id, verdict.model_dump())
                     return {
+                        "request_id": request_id,
+                        "purpose": purpose,
+                        "provider_requests": provider_requests,
                         "verdict": verdict.model_dump(),
                         "model": self.model,
                         "prompt_version": PROMPT_VERSION,
@@ -189,7 +322,7 @@ class GroqAgent:
                     }
                 self.repository.event(
                     "tool_result",
-                    candidate_id,
+                    request_id,
                     {"name": name, "arguments": arguments, "result": result},
                 )
                 messages.append(
@@ -205,6 +338,11 @@ class GroqAgent:
             # Keep public errors short. Validation messages can include arbitrary model output.
             detail = str(error) if isinstance(error, AgentError) else type(error).__name__
             result = {
+                "request_id": request_id,
+                "purpose": purpose,
+                "candidate_id": candidate_id,
+                "error_details": error.details if isinstance(error, AgentError) else {},
+                "provider_requests": provider_requests,
                 "verdict": None,
                 "model": self.model,
                 "prompt_version": PROMPT_VERSION,
@@ -213,5 +351,5 @@ class GroqAgent:
                 "latency_seconds": time.monotonic() - start,
                 "error": detail,
             }
-            self.repository.event("agent_error", candidate_id, result)
+            self.repository.event("agent_error", request_id, result)
             return result

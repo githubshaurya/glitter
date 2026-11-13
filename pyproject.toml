@@ -22,6 +22,8 @@ glitter-check = "trading.main:check"
 glitter-report = "trading.reporting:main"
 glitter-experiment = "trading.experiments:main"
 glitter-halt = "trading.main:halt"
+glitter-commission = "trading.commissioning:main"
+glitter-public-replay = "trading.public_replay:main"
 
 [build-system]
 requires = ["hatchling"]

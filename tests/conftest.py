@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -138,6 +139,7 @@ class FakeBroker:
     def submit(self, payload):
         self.submitted.append(payload)
         order = {
+            **payload,
             "id": "broker-" + payload["client_order_id"],
             "client_order_id": payload["client_order_id"],
             "symbol": payload["symbol"].replace("/", ""),
@@ -171,7 +173,8 @@ class FakeAgent:
     def __init__(self, approve=True):
         self.approve = approve
 
-    def vet(self, observation):
+    def vet(self, observation, *, purpose="strategy"):
+        json.dumps(observation, allow_nan=False)
         return {
             "verdict": {
                 "candidate_id": observation["candidate"]["id"],

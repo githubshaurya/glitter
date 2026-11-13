@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
+from math import lcm
 
 from trading.config import SYMBOLS
 from trading.models import RiskCheck, RiskResult, canonical_symbol
@@ -26,6 +27,15 @@ def assess(settings, candidate, account, quote, asset, control, unresolved, entr
 
     buying = candidate.action == "BUY"
     held = decimal_value(account.positions.get(candidate.symbol, {}).get("qty", "0"))
+    minimum = decimal_value(asset["min_order_size"])
+    increment = decimal_value(asset["min_trade_increment"])
+    tick = decimal_value(asset.get("price_increment") or asset["min_price_increment"])
+    if increment <= 0 or minimum <= 0 or tick <= 0:
+        raise ValueError("Invalid asset precision")
+    # Use a grid satisfying both asset metadata and the documented two-decimal
+    # order-price constraint. Current BTC/ETH metadata can report a much finer grid.
+    scale = Decimal(10) ** max(2, -tick.as_tuple().exponent)
+    tick = Decimal(lcm(int(tick * scale), int(Decimal(".01") * scale))) / scale
     check("action", candidate.action in {"BUY", "SELL"}, candidate.action, "BUY or SELL")
     signal_age = at - candidate.cutoff
     check(
@@ -77,9 +87,9 @@ def assess(settings, candidate, account, quote, asset, control, unresolved, entr
     check("pending_account_orders", not buying or not account.orders, len(account.orders), 0)
     check(
         "position_transition",
-        (held == 0 if buying else held > 0),
+        (0 <= held < minimum if buying else held >= minimum),
         held,
-        "flat for BUY; long for SELL",
+        "below minimum tradable quantity for BUY; tradable long for SELL",
     )
     check(
         "entry_count",
@@ -89,11 +99,6 @@ def assess(settings, candidate, account, quote, asset, control, unresolved, entr
     )
     if not all(c.passed for c in checks):
         return RiskResult(allowed=False, checks=checks)
-    increment = decimal_value(asset["min_trade_increment"])
-    minimum = decimal_value(asset["min_order_size"])
-    tick = decimal_value(asset.get("price_increment") or asset["min_price_increment"])
-    if increment <= 0 or minimum <= 0 or tick <= 0:
-        raise ValueError("Invalid asset precision")
     # Marketable IOC limit caps BUY execution cost; market order prices cannot enforce a cap.
     price = quantize_step(
         quote.ask * Decimal("1.001") if buying else quote.bid * Decimal("0.999"),
@@ -107,6 +112,7 @@ def assess(settings, candidate, account, quote, asset, control, unresolved, entr
     if buying:
         budget = min(
             account.equity * settings.max_order_fraction,
+            settings.max_order_notional_usd,
             account.equity * settings.max_symbol_fraction - symbol_exposure,
             account.equity * settings.max_total_fraction - exposure,
             max(Decimal(0), min(account.cash, account.buying_power)) / Decimal("1.0025"),
@@ -124,6 +130,12 @@ def assess(settings, candidate, account, quote, asset, control, unresolved, entr
         not buying or notional <= account.equity * settings.max_order_fraction,
         notional,
         account.equity * settings.max_order_fraction,
+    )
+    check(
+        "max_order_notional",
+        not buying or notional <= settings.max_order_notional_usd,
+        notional,
+        settings.max_order_notional_usd,
     )
     check(
         "max_symbol",

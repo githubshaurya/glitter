@@ -1,9 +1,13 @@
 # Validation status
 
+Current detailed assessment: [pre-submission review](PRE_SUBMISSION_REVIEW.md) and
+[measured public-data experiments](EXPERIMENT_RESULTS.md). The expanded CI result is pending
+until its commit workflow is observed; older runs below remain historical evidence.
+
 ## Observed locally
 
-- 43 Python tests passed with SQLite after the latest regressions.
-- 43 tests passed against actual PostgreSQL 16 after the latest regressions.
+- 84 Python tests passed with SQLite after the strict pre-submission regressions.
+- 84 tests passed against actual PostgreSQL 16 after the strict pre-submission regressions.
 - Ruff lint, formatting and JavaScript syntax passed.
 - Real Alpaca paper account, allowed assets, quotes and 300-hour history reads succeeded.
 - Real GPT-OSS 120B public-market tool loop succeeded and returned HOLD.
@@ -11,6 +15,10 @@
 - Broker-only proof-pack command succeeded using actual account snapshots and aligned BTC prices.
 - .env is ignored, permission-restricted, and excluded from Docker's build context.
 - Dedicated personal engineering skill validated, installed and forward-tested read-only.
+
+- Separate spawned-process contention and SIGKILL before POST/after simulated acceptance passed.
+- Real public-only at-most-$2 probe produced an unresolved UNKNOWN, no found broker order or fill. No retry occurred; HALTED persists. A separate zero-quantity API probe returned the expected 422 rejection.
+- Completed two public historical engineering comparisons with measured failures, latency and token counts; original datasets retained. Account-aware forward experiments remain pending.
 
 ## Not claimed
 

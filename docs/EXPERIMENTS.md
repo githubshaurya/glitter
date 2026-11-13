@@ -51,3 +51,12 @@ silently substituted with sell-order success rate. Report zero completed trades 
 Safety tests are not financial experiments. Synthetic test prices and fake brokers are labeled
 test doubles and never become strategy results. Public commissioning HOLD checks are neither
 an experiment sample nor evidence of an executed trade.
+
+## Completed public-only measurements
+
+`uv run glitter-public-replay` uses only historical public market observations; no account
+context or broker order is involved. The entry-focused protocol screens a fixed 28-day 08:00
+UTC grid and selects the first 12 past-only positive-EMA candidates. It persists the selection
+before inference, alternates model order, reports failures and never sends forward scoring data
+to the model. See EXPERIMENT_RESULTS.md for the retained pilot, follow-up and limitations.
+These measurements do not certify account-aware trading or replace the required forward run.

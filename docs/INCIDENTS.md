@@ -52,3 +52,37 @@ reset while the newly launched container was starting; curl's original retry fla
 refused connections but not resets. Expanded retries for this idempotent readiness GET and
 added an exit trap to retain container logs and clean up. The rerun passed Docker startup,
 health, index serving and API authentication checks.
+
+## Pre-submission: uncertain real paper probe
+
+At 2026-11-13T14:31Z, a public-context operational probe committed its intent and made one
+paper POST. BrokerError left it UNKNOWN. Repeated lookup and order/activity export found no
+order, but absence was not used as permission to retry. No paper fill is claimed. Original
+HTTP details were not retained, preventing a definitive cause; subsequent lookup overwrote
+the limited diagnostic. Fixed both diagnostic loss paths. New HTTP errors retain redacted
+status/code/message; GET misses preserve earlier evidence. A separate nonexecuting zero-qty
+probe confirmed a broker 422 validation response. Price precision was conservatively hardened
+from official documentation, without asserting it caused this incident. HALTED persists.
+Operator/broker review is required to resolve the retained intent; no deletion or new-database
+workaround was used.
+
+## Pre-submission: scheduler liveness hid worker failure
+
+A database exception could trigger another exception while logging, ending the background
+worker while the HTTP health route remained green. Worker exception handling now tolerates
+journal failure; authenticated readiness checks worker freshness, latest slot, database and
+uncertain orders separately from process liveness. Model failures produce DEGRADED and nonzero
+cycle exit. Tests reproduce logging failure, unhealthy readiness and missing model output.
+
+## Pre-submission: reporting and explanation accuracy
+
+Old reporting excluded an entire symbol when any coin fee existed and could report a zero
+return from one equity sample. Added exact fill deduplication, partial-exit grouping, linked
+USD/coin fees, date-only residual debits and explicit unallocated-fee/open-inventory reporting.
+Fetch fees through export time because creation can follow the trading date. Cash/asset flows
+invalidate simple strategy-return interpretation. Net numbers remain provisional, not fee-final.
+
+Public replay exposed one unknown-evidence verdict and unsupported execution assurances from
+ATR without quotes. Kept failures and original results; corrected the prompt without turning
+failed responses into vetoes. Tool context now uses an explicit allowlist, excluding local audit
+fields even when an observation is reused in replay. Regression tests prove the exclusion.

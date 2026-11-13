@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trading.agent import GroqAgent
-from trading.config import Settings
+from trading.config import PROMPT_VERSION, STRATEGY_VERSION, Settings
 from trading.models import AccountState, Quote, timestamp
 from trading.repository import Repository, safe_json
 from trading.risk import assess
@@ -57,7 +57,10 @@ def compare_models(settings, repository, observations, agent_factory=GroqAgent):
         for observation in observations:
             # Alternate order to reduce a fixed provider-load/order advantage.
             order = agents if len(records) % 2 == 0 else list(reversed(agents))
-            results = {agent.model: agent.vet(copy.deepcopy(observation)) for agent in order}
+            results = {
+                agent.model: agent.vet(copy.deepcopy(observation), purpose="model_comparison")
+                for agent in order
+            }
             records.append({"candidate_id": observation["candidate"]["id"], "results": results})
     finally:
         for agent in agents:
@@ -159,7 +162,11 @@ def simulate_portfolios(settings, repository, observations, agent):
                 orders=[],
             )
             proposal = candidate(
-                symbol, timestamp(observed["cutoff"]), observed["features"], account
+                symbol,
+                timestamp(observed["cutoff"]),
+                observed["features"],
+                account,
+                observed["asset"]["min_order_size"],
             )
             eligible = assess(
                 settings,
@@ -186,8 +193,8 @@ def simulate_portfolios(settings, repository, observations, agent):
                     "mode": "ACTIVE",
                     "loss_latched": portfolio["loss_latched"],
                 }
-                analysis = agent.vet(own_observation)
-                approved = proposal.action == "SELL" or bool(
+                analysis = agent.vet(own_observation, purpose="portfolio_simulation")
+                approved = bool(proposal.action == "SELL" and analysis["verdict"]) or bool(
                     analysis["verdict"] and analysis["verdict"]["verdict"] == "APPROVE"
                 )
             fill = None
@@ -266,7 +273,14 @@ def main():
     repository = Repository(settings.database_url)
     repository.initialize()
     observations = sorted(repository.rows("observations"), key=lambda o: (o["slot"], o["symbol"]))
-    observations = [o["data"] for o in observations[: settings.experiment_limit]]
+    observations = [
+        o["data"]
+        for o in observations
+        if not o["slot"].startswith("commissioning:")
+        and o["data"].get("strategy_version") == STRATEGY_VERSION
+        and o["data"].get("prompt_version") == PROMPT_VERSION
+    ]
+    observations = observations[: settings.experiment_limit]
     if not observations:
         raise SystemExit(
             "No stored observations. Run the system first; experiments never fabricate samples."

@@ -1,0 +1,148 @@
+[
+  {
+    "candidate_id": "public-BTCUSD-20261019T0800Z",
+    "analysis": {
+      "request_id": "99aa9a41-a91d-4f0d-a441-57cfe9eb704b",
+      "purpose": "prompt_regression",
+      "provider_requests": [
+        {
+          "id": "chatcmpl-080ccfee-76bc-4bce-8d7c-3edd914a1178",
+          "model": "openai/gpt-oss-120b",
+          "system_fingerprint": "fp_86dc843b12",
+          "request_id": "req_01m7apmtkfews8x9e1810pzkt1"
+        },
+        {
+          "id": "chatcmpl-46764856-b136-458c-ad93-c8b388797bf0",
+          "model": "openai/gpt-oss-120b",
+          "system_fingerprint": "fp_96d96a151c",
+          "request_id": "req_01m7apmv0cev4t696w5wmdk3ps"
+        }
+      ],
+      "verdict": {
+        "candidate_id": "public-BTCUSD-20261019T0800Z",
+        "verdict": "APPROVE",
+        "reason_codes": [
+          "TREND_ALIGNED"
+        ],
+        "evidence": [
+          "ema_spread",
+          "trend_4h",
+          "rsi_14",
+          "atr_pct"
+        ],
+        "rationale": "EMA 8 is above EMA 24 by ~0.58% (58\u202fbps), well above the 10\u202fbps threshold, and the 4\u2011hour trend indicator is positive, confirming higher\u2011timeframe alignment. RSI 14 is 65.4, below typical overbought levels, and ATR\u202fpct (0.42%) shows moderate volatility. No conflicting trend, extreme momentum, or volatility concerns are present, so the entry meets the strategy criteria."
+      },
+      "model": "openai/gpt-oss-120b",
+      "prompt_version": "entry-veto-v3",
+      "usage": {
+        "prompt_tokens": 1509,
+        "completion_tokens": 796,
+        "total_tokens": 2305
+      },
+      "tools": [
+        "get_decision_context",
+        "submit_verdict"
+      ],
+      "latency_seconds": 9.481162257000506,
+      "error": null
+    }
+  },
+  {
+    "candidate_id": "public-ETHUSD-20261021T0800Z",
+    "analysis": {
+      "request_id": "7c1cc30e-eba8-45d6-8dc9-9a1a1fece86d",
+      "purpose": "prompt_regression",
+      "provider_requests": [
+        {
+          "id": "chatcmpl-bd2a4627-264e-4433-8d1f-a761e47984f9",
+          "model": "openai/gpt-oss-120b",
+          "system_fingerprint": "fp_93703442d9",
+          "request_id": "req_01m7apmwy5eabsd441wxt818pg"
+        },
+        {
+          "id": "chatcmpl-eeb0c52e-6987-492f-9e47-1e5cbd371f85",
+          "model": "openai/gpt-oss-120b",
+          "system_fingerprint": "fp_fe269835c7",
+          "request_id": "req_01m7apmxsme07vmh8egw9nttjh"
+        }
+      ],
+      "verdict": {
+        "candidate_id": "public-ETHUSD-20261021T0800Z",
+        "verdict": "APPROVE",
+        "reason_codes": [
+          "TREND_ALIGNED"
+        ],
+        "evidence": [
+          "ema_spread",
+          "trend_4h",
+          "rsi_14",
+          "atr_pct",
+          "return_1h",
+          "return_24h"
+        ],
+        "rationale": "The 8\u2011hour EMA exceeds the 24\u2011hour EMA by ~38\u202fbps (ema_spread), well above the 10\u202fbps rule threshold. The 4\u2011hour trend indicator is positive (trend_4h), confirming higher\u2011timeframe uptrend. Momentum is modestly positive (return_1h, return_24h) and volatility is moderate (atr_pct, volatility_24h), with no extreme spikes. Execution quality cannot be assessed due to missing quote data, but no conflicting signals are present, so the entry aligns with the strategy."
+      },
+      "model": "openai/gpt-oss-120b",
+      "prompt_version": "entry-veto-v3",
+      "usage": {
+        "prompt_tokens": 1511,
+        "completion_tokens": 775,
+        "total_tokens": 2286
+      },
+      "tools": [
+        "get_decision_context",
+        "submit_verdict"
+      ],
+      "latency_seconds": 2.814103714000339,
+      "error": null
+    }
+  },
+  {
+    "candidate_id": "public-ETHUSD-20261102T0800Z",
+    "analysis": {
+      "request_id": "eb8b9f18-1330-4336-92c1-e311caa6dddf",
+      "purpose": "prompt_regression",
+      "provider_requests": [
+        {
+          "id": "chatcmpl-434b0b46-53fa-4423-994c-2c0a84175b1a",
+          "model": "openai/gpt-oss-120b",
+          "system_fingerprint": "fp_4200b3f836",
+          "request_id": "req_01m7apmzp5ezka7j22ec573cfj"
+        },
+        {
+          "id": "chatcmpl-e1053854-100c-4da4-8158-1ad1aed2c9fb",
+          "model": "openai/gpt-oss-120b",
+          "system_fingerprint": "fp_19b184c447",
+          "request_id": "req_01m7apn05re0eaf7ebsb1z6d1a"
+        }
+      ],
+      "verdict": {
+        "candidate_id": "public-ETHUSD-20261102T0800Z",
+        "verdict": "APPROVE",
+        "reason_codes": [
+          "TREND_ALIGNED"
+        ],
+        "evidence": [
+          "ema_spread",
+          "trend_4h",
+          "rsi_14",
+          "atr_pct"
+        ],
+        "rationale": "EMA 8 is above EMA 24 by ~0.42% (42 bps), exceeding the required 10 bps. The 4\u2011hour trend is positive (0.283%), aligning with the BUY direction. RSI is neutral (55.9) and volatility (ATR 0.51%, 24h vol 1.64%) is moderate, with no extreme short\u2011term momentum. Execution quality is unknown but not a disqualifying concern. All evidence supports the trend\u2011following entry."
+      },
+      "model": "openai/gpt-oss-120b",
+      "prompt_version": "entry-veto-v3",
+      "usage": {
+        "prompt_tokens": 1512,
+        "completion_tokens": 912,
+        "total_tokens": 2424
+      },
+      "tools": [
+        "get_decision_context",
+        "submit_verdict"
+      ],
+      "latency_seconds": 2.7765068339995196,
+      "error": null
+    }
+  }
+]

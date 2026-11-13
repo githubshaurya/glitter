@@ -1,20 +1,45 @@
 import asyncio
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from trading.broker import AlpacaBroker
 from trading.config import Settings
 from trading.main import build_application
+from trading.models import now_utc, timestamp
 from trading.repository import Repository, safe_json
 
 STATIC = Path(__file__).parent / "static"
+logger = logging.getLogger(__name__)
+
+
+def run_worker_cycle(settings, repository):
+    application = None
+    try:
+        application = build_application(settings)
+        return application.run()
+    except Exception as error:
+        result = {"status": "ERROR", "error_type": type(error).__name__}
+        try:
+            repository.event("worker_error", "web", result)
+        except Exception:
+            # A database outage must not kill the scheduler while trying to journal the outage.
+            logger.error(
+                "Trading cycle failed and journal is unavailable: %s", type(error).__name__
+            )
+        return result
+    finally:
+        if application:
+            application.broker.close()
+            application.agent.close()
+            application.repository.engine.dispose()
 
 
 class ControlUpdate(BaseModel):
@@ -28,20 +53,24 @@ def create_app(settings=None, repository=None, broker_factory=AlpacaBroker):
     repository.initialize()
 
     stop = asyncio.Event()
+    worker_state = {
+        "running": False,
+        "last_started_at": None,
+        "last_finished_at": None,
+        "last_result": None,
+    }
 
     async def worker():
         while not stop.is_set():
-            application = None
+            worker_state.update(running=True, last_started_at=now_utc().isoformat())
             try:
-                application = build_application(settings)
-                await asyncio.to_thread(application.run)
+                result = await asyncio.to_thread(run_worker_cycle, settings, repository)
             except Exception as error:
-                repository.event("worker_error", "web", {"error_type": type(error).__name__})
-            finally:
-                if application:
-                    application.broker.close()
-                    application.agent.close()
-                    application.repository.engine.dispose()
+                logger.error("Trading worker cycle failed: %s", type(error).__name__)
+                result = {"status": "ERROR", "error_type": type(error).__name__}
+            worker_state.update(
+                running=False, last_finished_at=now_utc().isoformat(), last_result=result
+            )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=settings.poll_seconds)
             except TimeoutError:
@@ -50,9 +79,11 @@ def create_app(settings=None, repository=None, broker_factory=AlpacaBroker):
     @asynccontextmanager
     async def lifespan(app):
         task = asyncio.create_task(worker())
-        yield
-        stop.set()
-        await task
+        try:
+            yield
+        finally:
+            stop.set()
+            await task
 
     app = FastAPI(
         title="Glitter Paper", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
@@ -79,6 +110,36 @@ def create_app(settings=None, repository=None, broker_factory=AlpacaBroker):
     def health():
         return {"status": "ok", "paper_only": True}
 
+    @app.get("/readyz", dependencies=[Depends(authenticate)])
+    def readiness():
+        try:
+            repository.control()
+            latest = next((run for run in repository.rows("runs", 100) if run["slot"]), None)
+            unresolved = repository.unresolved()
+        except Exception:
+            return JSONResponse({"ready": False, "reason": "Database unavailable"}, status_code=503)
+        finished = worker_state["last_finished_at"]
+        recent = (
+            finished
+            and (now_utc() - timestamp(finished)).total_seconds() <= 2 * settings.poll_seconds + 60
+        )
+        successful = worker_state["last_result"] and worker_state["last_result"]["status"] not in {
+            "ERROR",
+            "DEGRADED",
+        }
+        healthy_decision = not latest or latest["status"] not in {
+            "ERROR",
+            "DEGRADED",
+            "RUNNING",
+            "ABANDONED",
+        }
+        uncertain = any(row["state"] in {"UNKNOWN", "SUBMITTING"} for row in unresolved)
+        ready = bool(recent and successful and healthy_decision and not uncertain)
+        return JSONResponse(
+            safe_json({"ready": ready, "worker": worker_state, "uncertain_orders": uncertain}),
+            status_code=200 if ready else 503,
+        )
+
     @app.get("/")
     def index():
         return FileResponse(STATIC / "index.html")
@@ -91,44 +152,31 @@ def create_app(settings=None, repository=None, broker_factory=AlpacaBroker):
                 "policy": settings.public_policy(),
                 "execution_enabled": settings.execution_enabled,
                 "model": settings.groq_model,
+                "worker": worker_state,
                 "equity": list(reversed(repository.rows("equity_snapshots", 2000))),
                 "runs": repository.rows("runs", 30),
                 "intents": repository.rows("order_intents", 100),
                 "decisions": repository.rows("decisions", 100),
-                "observations": repository.rows("observations", 100),
+                "observations": repository.observation_headers(100),
                 "experiments": repository.rows("experiments", 10),
             }
         )
 
     @app.get("/api/decisions/{observation_id}", dependencies=[Depends(authenticate)])
     def trace(observation_id: str):
-        observation = next(
-            (o for o in repository.rows("observations") if o["id"] == observation_id), None
-        )
-        if not observation:
+        result = repository.decision_trace(observation_id)
+        if result is None:
             raise HTTPException(404, "Decision not found")
-        matching = [
-            d for d in repository.rows("decisions") if d["observation_id"] == observation_id
-        ]
-        ids = {observation_id, *(d["id"] for d in matching)}
-        orders = [i for i in repository.rows("order_intents") if i["decision_id"] in ids]
-        ids.update(i["id"] for i in orders)
-        return safe_json(
-            {
-                "observation": observation,
-                "decisions": matching,
-                "orders": orders,
-                "events": [e for e in repository.rows("events") if e["correlation_id"] in ids],
-            }
-        )
+        return safe_json(result)
 
     @app.post("/api/control", dependencies=[Depends(authenticate)])
     def control(update: ControlUpdate):
         repository.set_mode(update.mode, update.reason)
         cancellation = None
         if update.mode == "HALTED":
-            broker = broker_factory(settings)
+            broker = None
             try:
+                broker = broker_factory(settings)
                 cancellation = broker.cancel_all()
                 repository.event("cancel_open_orders", "dashboard", {"responses": cancellation})
             except Exception as error:
@@ -138,7 +186,8 @@ def create_app(settings=None, repository=None, broker_factory=AlpacaBroker):
                 }
                 repository.event("cancel_error", "dashboard", cancellation)
             finally:
-                broker.close()
+                if broker:
+                    broker.close()
         return safe_json({"control": repository.control(), "cancellation": cancellation})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

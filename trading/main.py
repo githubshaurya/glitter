@@ -24,7 +24,7 @@ def cycle():
     try:
         result = application.run()
         print(json.dumps(safe_json(result)))
-        if result["status"] == "ERROR":
+        if result["status"] in {"ERROR", "DEGRADED"}:
             raise SystemExit(1)
     finally:
         application.broker.close()

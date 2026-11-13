@@ -10,11 +10,12 @@ from trading.models import AccountState, Bar, Quote, canonical_symbol, timestamp
 
 
 class BrokerError(RuntimeError):
-    def __init__(self, operation, status=None):
+    def __init__(self, operation, status=None, details=None):
         super().__init__(
             f"{operation} failed" + (f" (HTTP {status})" if status else " (transport)")
         )
         self.status = status
+        self.details = {"operation": operation, "status": status, **(details or {})}
 
 
 class AlpacaBroker:
@@ -50,12 +51,26 @@ class AlpacaBroker:
                     except ValueError:
                         raise BrokerError(f"{method} {path}: invalid JSON") from None
                 if response.status_code not in {429, 500, 502, 503, 504} or attempt + 1 == attempts:
-                    raise BrokerError(f"{method} {path}", response.status_code)
+                    try:
+                        error_body = response.json()
+                        details = {
+                            "code": error_body.get("code"),
+                            "message": str(error_body.get("message", ""))[:1000],
+                        }
+                    except (ValueError, AttributeError):
+                        details = {"message": response.text[:1000]}
+                    for key in ("APCA-API-KEY-ID", "APCA-API-SECRET-KEY"):
+                        details["message"] = details["message"].replace(
+                            self.client.headers[key], "[REDACTED]"
+                        )
+                    raise BrokerError(f"{method} {path}", response.status_code, details)
             time.sleep((0.2 * 2**attempt) + random.uniform(0, 0.1))
         raise BrokerError(f"{method} {path}")
 
     def account(self):
         account = self.request("GET", "/v2/account")
+        if account.get("currency") != "USD":
+            raise BrokerError("Only USD-denominated paper accounts are supported")
         positions = self.request("GET", "/v2/positions")
         orders = self.request("GET", "/v2/orders", params={"status": "open", "limit": 500})
         if len(orders) >= 500:

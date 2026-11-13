@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PAPER_URL = "https://paper-api.alpaca.markets"
 SYMBOLS = ("BTC/USD", "ETH/USD")
-STRATEGY_VERSION = "ema-8-24-v1"
-PROMPT_VERSION = "entry-veto-v1"
+STRATEGY_VERSION = "ema-8-24-v2"
+PROMPT_VERSION = "entry-veto-v3"
 
 
 class Settings(BaseSettings):
@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     port: int = Field(8000, ge=1, le=65535)
     poll_seconds: int = Field(900, ge=60)
     max_order_fraction: Decimal = Field(Decimal("0.01"), gt=0, le=Decimal("0.01"))
+    max_order_notional_usd: Decimal = Field(Decimal("1000"), gt=0, le=Decimal("1000"))
     max_symbol_fraction: Decimal = Field(Decimal("0.02"), gt=0, le=Decimal("0.02"))
     max_total_fraction: Decimal = Field(Decimal("0.04"), gt=0, le=Decimal("0.04"))
     max_daily_loss: Decimal = Field(Decimal("0.01"), gt=0, le=Decimal("0.01"))
@@ -71,6 +72,7 @@ class Settings(BaseSettings):
             k: str(getattr(self, k))
             for k in (
                 "max_order_fraction",
+                "max_order_notional_usd",
                 "max_symbol_fraction",
                 "max_total_fraction",
                 "max_daily_loss",

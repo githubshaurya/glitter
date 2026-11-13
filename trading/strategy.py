@@ -82,12 +82,13 @@ def features(bars, cutoff):
     }
 
 
-def candidate(symbol, cutoff, values, account):
+def candidate(symbol, cutoff, values, account, minimum_quantity="0"):
     quantity = Decimal(str(account.positions.get(symbol, {}).get("qty", "0")))
+    tradable_position = quantity > 0 and quantity >= Decimal(str(minimum_quantity))
     spread = values["ema_spread"]
-    if quantity == 0 and spread > 0.001:
+    if not tradable_position and quantity >= 0 and spread > 0.001:
         action, rule = "BUY", "ema_8_above_24_by_10bps"
-    elif quantity > 0 and spread < -0.001:
+    elif tradable_position and spread < -0.001:
         action, rule = "SELL", "ema_8_below_24_by_10bps"
     else:
         action, rule = "HOLD", "no_position_transition"

@@ -245,6 +245,15 @@ class Repository:
         with self.engine.connect() as connection:
             return dict(connection.execute(select(controls)).mappings().one())
 
+    def intent(self, client_order_id):
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(select(intents).where(intents.c.id == client_order_id))
+                .mappings()
+                .first()
+            )
+            return dict(row) if row else None
+
     def set_mode(self, mode, reason):
         if mode not in {"ACTIVE", "NO_NEW_RISK", "HALTED"}:
             raise ValueError("Invalid control mode")
@@ -330,6 +339,29 @@ class Repository:
             return run_id
         except IntegrityError:
             return None
+
+    def abandon_interrupted_runs(self):
+        self.verify_worker()
+        with self.engine.begin() as connection:
+            interrupted = (
+                connection.execute(select(runs.c.id).where(runs.c.status == "RUNNING"))
+                .scalars()
+                .all()
+            )
+            if interrupted:
+                connection.execute(
+                    update(runs)
+                    .where(runs.c.id.in_(interrupted))
+                    .values(
+                        status="ABANDONED",
+                        finished_at=now_utc().isoformat(),
+                        data={
+                            "reason": "Previous worker ended before recording completion; slot is not replayed"
+                        },
+                    )
+                )
+                append_event(connection, "interrupted_runs", "system", {"ids": interrupted})
+            return interrupted
 
     def finish_run(self, run_id, status, data):
         with self.engine.begin() as connection:
@@ -420,6 +452,19 @@ class Repository:
             ).all()
         return len(rows)
 
+    def owned_quantity(self, symbol):
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(intents.c.side, intents.c.broker).where(intents.c.symbol == symbol)
+            ).mappings()
+            quantity = Decimal(0)
+            for row in rows:
+                filled = Decimal(str(row["broker"].get("filled_qty") or "0"))
+                if not filled.is_finite() or filled < 0:
+                    raise ValueError("Invalid recorded filled quantity")
+                quantity += filled if row["side"] == "buy" else -filled
+            return quantity
+
     def rows(self, table_name, limit=None):
         table = TABLES[table_name]
         query = select(table)
@@ -434,6 +479,54 @@ class Repository:
             query = query.limit(limit)
         with self.engine.connect() as connection:
             return [dict(row) for row in connection.execute(query).mappings()]
+
+    def observation_headers(self, limit=100):
+        with self.engine.connect() as connection:
+            query = (
+                select(observations.c.id, observations.c.symbol, observations.c.slot)
+                .order_by(observations.c.slot.desc())
+                .limit(limit)
+            )
+            return [dict(row) for row in connection.execute(query).mappings()]
+
+    def decision_trace(self, observation_id):
+        with self.engine.connect() as connection:
+            observation = (
+                connection.execute(select(observations).where(observations.c.id == observation_id))
+                .mappings()
+                .first()
+            )
+            if observation is None:
+                return None
+            matching = [
+                dict(row)
+                for row in connection.execute(
+                    select(decisions).where(decisions.c.observation_id == observation_id)
+                ).mappings()
+            ]
+            decision_ids = [row["id"] for row in matching]
+            orders = [
+                dict(row)
+                for row in connection.execute(
+                    select(intents).where(intents.c.decision_id.in_(decision_ids))
+                ).mappings()
+            ]
+            # New agent requests have unique IDs, so replay/model-comparison calls cannot
+            # overwrite or masquerade as the live decision's explanation. Candidate IDs
+            # remain included to preserve older journal records.
+            ids = [observation_id, *decision_ids, *(row["id"] for row in orders)]
+            ids.extend(row["data"].get("agent", {}).get("request_id") for row in matching)
+            rows = connection.execute(
+                select(events)
+                .where(events.c.correlation_id.in_([value for value in ids if value]))
+                .order_by(events.c.id)
+            ).mappings()
+            return {
+                "observation": dict(observation),
+                "decisions": matching,
+                "orders": orders,
+                "events": [dict(row) for row in rows],
+            }
 
     def save_experiment(self, result):
         with self.engine.begin() as connection:

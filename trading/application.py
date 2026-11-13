@@ -23,13 +23,14 @@ class TradingApplication:
         with self.repository.worker_lock() as acquired:
             if not acquired:
                 return {"status": "BUSY"}
+            self.repository.abandon_interrupted_runs()
             monitor_id = self.repository.start_run()
             run_id = None
             try:
                 self.execution.cancel_if_halted()
                 reconciliation = self.execution.reconcile()
                 account = self.broker.account()
-                self.repository.update_account(account, self.settings, at)
+                self.repository.update_account(account, self.settings, now_utc())
                 self.execution.cancel_if_halted()
                 cutoff = at.replace(minute=0, second=0, microsecond=0)
                 if at - cutoff > timedelta(minutes=45):
@@ -43,6 +44,9 @@ class TradingApplication:
                     else:
                         result = self.decide(run_id, cutoff, account)
                 result["reconciliation"] = reconciliation
+                if any(order["state"] == "UNKNOWN" for order in reconciliation):
+                    result["status"] = "DEGRADED"
+                    result["reason"] = "Uncertain broker order remains unresolved"
                 result["duration_seconds"] = time.monotonic() - start
                 if run_id:
                     self.repository.finish_run(run_id, result["status"], result)
@@ -69,7 +73,8 @@ class TradingApplication:
             values = features(history, cutoff)
             quote = quotes[symbol]
             values["spread_bps"] = float(quote.spread_bps)
-            proposal = candidate(symbol, cutoff, values, account)
+            asset = self.broker.asset(symbol)
+            proposal = candidate(symbol, cutoff, values, account, asset["min_order_size"])
             observation = safe_json(
                 {
                     "cutoff": cutoff.isoformat(),
@@ -84,7 +89,7 @@ class TradingApplication:
                     "strategy_version": STRATEGY_VERSION,
                     "prompt_version": PROMPT_VERSION,
                     "candles": [b.model_dump(mode="json") for b in history],
-                    "asset": self.broker.asset(symbol),
+                    "asset": asset,
                 }
             )
             observation_id = self.repository.save_observation(
@@ -118,7 +123,7 @@ class TradingApplication:
             approved = verdict is not None and verdict["verdict"] == "APPROVE"
             # Rule SELL is a risk-reducing exit; agent is consulted and journaled, but cannot veto it.
             if proposal.action == "SELL":
-                approved = True
+                approved = verdict is not None
             decision_id = self.repository.save_decision(
                 observation_id,
                 "agent_vetted",
@@ -143,4 +148,7 @@ class TradingApplication:
                     "execution": outcome,
                 }
             )
-        return {"status": "COMPLETED", "decisions": results}
+        degraded = any(
+            row["verdict"] == "ERROR" or row["execution"]["state"] == "UNKNOWN" for row in results
+        )
+        return {"status": "DEGRADED" if degraded else "COMPLETED", "decisions": results}

@@ -33,3 +33,31 @@ passed both 43-test database suites, both desktop/mobile tests and Docker build/
 checks. Inspected CI screenshots. Also verified GPT-OSS 20B on the stored public commissioning
 context (HOLD; 1,770 tokens; one 8.94-second sample). No actual order, three-day run or financial
 experiment result is claimed. Private account-context execution remains disabled pending consent.
+
+2026-11-13T14:00–15:00Z: strict pre-submission review. Added a public-only at-most-$2
+commissioning command, absolute notional cap, full broker-payload verification, idempotent
+intent replay, unique model request correlation, worker/database readiness, abandoned-slot
+recovery, explicit tool-field allowlist, strategy ownership checks, tradable dust handling and
+Decimal fee ledger. Added separate-process races and SIGKILL recovery tests. At this stage
+81 tests pass on SQLite and PostgreSQL. Browser/Docker expansion awaits its new CI result.
+
+2026-11-13T14:31Z: one positive-quantity paper commissioning POST returned BrokerError,
+recorded UNKNOWN. No order/fill found by lookup or export; not resubmitted. Initial HTTP error
+details were missing, so the cause is unconfirmed. Added sanitized diagnostics and preservation
+across lookup misses. A distinct zero-quantity negative probe returned HTTP 422/code 40010001
+(qty must be > 0), confirming endpoint access without creating exposure. HALTED was persisted
+and actual paper cancellation requested after the incident; independent repository reads confirm it.
+
+2026-11-13T14:47–14:55Z: executed and retained a 12-observation HOLD pilot plus a predeclared
+12-entry public-history follow-up. Two measured comparisons, real requests, failures retained.
+See EXPERIMENT_RESULTS.md and public evidence JSON. Rationale inspection found unsupported
+execution assurances; tightened prompt to v3 and added a targeted real-model regression.
+
+2026-11-13T14:56Z: broker proof export completed: 34 aligned equity observations over 06:30–14:45
+UTC, zero exported orders/fills, account return 0, BTC gross benchmark +0.5665%, sampled BTC
+drawdown 0.9774%. This is an inactive-account export check, not strategy performance or an
+unattended-run claim. No fees, completed trades, private-context execution or 3-day run claimed.
+
+Final local pre-submission checks: 84 tests passed on SQLite and 84 on real PostgreSQL;
+Ruff, formatting, JS syntax, frozen lock check and credential-value source scan passed.
+Remote CI for the hardened code must be observed before claiming its browser/Docker checks.

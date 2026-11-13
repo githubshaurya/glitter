@@ -44,12 +44,19 @@ jobs:
         shell: bash
         run: |
           docker build -t glitter-paper:ci .
-          docker run -d --name glitter-ci -p 127.0.0.1:8000:8000 -e DASHBOARD_TOKEN=synthetic-ci-token glitter-paper:ci
-          trap 'docker logs glitter-ci; docker rm -f glitter-ci' EXIT
+          docker volume create glitter-ci-data
+          docker run -d --name glitter-ci -p 127.0.0.1:8000:8000 -v glitter-ci-data:/app/data -e DASHBOARD_TOKEN=synthetic-ci-token glitter-paper:ci
+          trap 'docker logs glitter-ci; docker rm -f glitter-ci; docker volume rm glitter-ci-data' EXIT
           curl --silent --show-error --fail --retry 15 --retry-all-errors --retry-delay 1 --max-time 3 http://127.0.0.1:8000/healthz
           curl --fail http://127.0.0.1:8000/ > /dev/null
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/overview)" = '401'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer synthetic-ci-token' http://127.0.0.1:8000/readyz)" = '503'
+          curl --fail -H 'Authorization: Bearer synthetic-ci-token' -H 'Content-Type: application/json' -d '{"mode":"HALTED","reason":"Docker persistence verification"}' http://127.0.0.1:8000/api/control
           docker stop glitter-ci
+          docker rm glitter-ci
+          docker run -d --name glitter-ci -p 127.0.0.1:8000:8000 -v glitter-ci-data:/app/data -e DASHBOARD_TOKEN=synthetic-ci-token glitter-paper:ci
+          curl --silent --show-error --fail --retry 15 --retry-all-errors --retry-delay 1 --max-time 3 http://127.0.0.1:8000/healthz
+          curl --silent --fail -H 'Authorization: Bearer synthetic-ci-token' http://127.0.0.1:8000/api/overview | python -c 'import json,sys; assert json.load(sys.stdin)["control"]["mode"] == "HALTED"'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

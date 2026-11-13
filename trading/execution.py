@@ -1,4 +1,7 @@
-from trading.models import now_utc
+from decimal import Decimal
+
+from trading.broker import BrokerError
+from trading.models import canonical_symbol, now_utc
 from trading.repository import append_event, intents
 from trading.risk import assess
 
@@ -9,24 +12,52 @@ class ExecutionService:
         self.repository = repository
         self.broker = broker
 
+    def verify_order(self, intent_id, payload, order):
+        quantity = Decimal(str(order.get("qty")))
+        filled = Decimal(str(order.get("filled_qty") or "0"))
+        price = Decimal(str(order.get("limit_price")))
+        matches = (
+            bool(order.get("id"))
+            and bool(order.get("status"))
+            and order.get("client_order_id") == intent_id
+            and canonical_symbol(order.get("symbol")) == payload["symbol"]
+            and order.get("side") == payload["side"]
+            and order.get("type") == payload["type"]
+            and order.get("time_in_force") == payload["time_in_force"]
+            and quantity.is_finite()
+            and filled.is_finite()
+            and price.is_finite()
+            and quantity == Decimal(payload["qty"])
+            and price == Decimal(payload["limit_price"])
+            and 0 <= filled <= quantity
+            and (order["status"] != "filled" or filled == quantity)
+        )
+        if filled > 0 and order.get("filled_avg_price") is not None:
+            average = Decimal(str(order["filled_avg_price"]))
+            matches = (
+                matches
+                and average.is_finite()
+                and average > 0
+                and (average <= price if payload["side"] == "buy" else average >= price)
+            )
+        if not matches:
+            raise RuntimeError("Broker order does not match the committed intent")
+
     def reconcile(self):
         result = []
         for intent in self.repository.unresolved():
             order = self.broker.lookup(intent["id"])
             if order is None:
+                previous = dict(intent["broker"])
+                previous["lookup"] = "Not found; absence is not proof of non-submission"
                 self.repository.update_intent(
                     intent["id"],
                     "UNKNOWN",
-                    {"reason": "Not found; absence is not proof of non-submission"},
+                    previous,
                 )
                 result.append({"id": intent["id"], "state": "UNKNOWN"})
                 continue
-            if (
-                order["client_order_id"] != intent["id"]
-                or order["side"] != intent["side"]
-                or order["symbol"].replace("/", "") != intent["symbol"].replace("/", "")
-            ):
-                raise RuntimeError("Broker order identity mismatch")
+            self.verify_order(intent["id"], intent["payload"], order)
             self.repository.update_intent(intent["id"], order["status"], order)
             result.append({"id": intent["id"], "state": order["status"]})
         return result
@@ -44,7 +75,23 @@ class ExecutionService:
         if not self.settings.execution_enabled:
             return {"state": "READ_ONLY"}
         self.repository.verify_worker()
+        existing = self.repository.intent("gl-" + candidate.id)
+        if existing:
+            if (
+                existing["symbol"] != candidate.symbol
+                or existing["side"] != candidate.action.lower()
+            ):
+                raise ValueError("Candidate ID reused for a different action")
+            return {"state": existing["state"], "client_order_id": existing["id"], "replayed": True}
         account = self.broker.account()
+        if candidate.action == "SELL":
+            held = Decimal(str(account.positions.get(candidate.symbol, {}).get("qty", "0")))
+            if held > self.repository.owned_quantity(candidate.symbol):
+                reason = (
+                    "Position exceeds journaled strategy-owned quantity; inspect manual activity"
+                )
+                self.repository.event("ownership_block", decision_id, {"reason": reason})
+                return {"state": "RISK_BLOCKED", "reason": reason}
         quote = self.broker.quotes()[candidate.symbol]
         asset = self.broker.asset(candidate.symbol)
         at = now_utc()
@@ -68,6 +115,7 @@ class ExecutionService:
         self.repository.save_intent(decision_id, payload)
         # The intent is committed BEFORE any broker write. A crash now sacrifices availability,
         # not safety: next run reconciles and never submits this intent again.
+        order = None
         try:
             with self.repository.control_transaction() as (connection, control):
                 self.repository.verify_worker()
@@ -112,8 +160,7 @@ class ExecutionService:
                 # Control updates take this same row lock. HALTED is linearized against submissions:
                 # once its transaction returns, no later broker POST can pass this gate.
                 order = self.broker.submit(payload)
-                if order.get("client_order_id") != payload["client_order_id"]:
-                    raise RuntimeError("Submission response client ID mismatch")
+                self.verify_order(payload["client_order_id"], payload, order)
                 state = order["status"]
                 connection.execute(
                     update(intents)
@@ -129,6 +176,12 @@ class ExecutionService:
         except Exception as error:
             # Includes commit failure after broker acceptance. Never attempt another POST.
             self.repository.update_intent(
-                payload["client_order_id"], "UNKNOWN", {"error_type": type(error).__name__}
+                payload["client_order_id"],
+                "UNKNOWN",
+                {
+                    "error_type": type(error).__name__,
+                    "received_order": order,
+                    "error_details": error.details if isinstance(error, BrokerError) else None,
+                },
             )
             return {"state": "UNKNOWN", "client_order_id": payload["client_order_id"]}

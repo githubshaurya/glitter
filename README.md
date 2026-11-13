@@ -69,11 +69,13 @@ flowchart TD
 
 BTC/USD and ETH/USD; hourly EMA(8,24), 10 bps hysteresis; 4-hour EMA(6,18), RSI,
 ATR, returns, volatility and quote spread as agent context. These are frozen engineering
-defaults, **not optimized or proven profitable**. Entry candidates are generated only when flat.
-The agent approves/vetoes entries. Rule exits are reviewed but cannot be blocked by a model
-failure or veto. Risk checks still apply to exits, and HALTED blocks every automated order.
+defaults, **not optimized or proven profitable**. Entry candidates require no tradable position;
+unsellable dust remains in exposure accounting. The agent approves/vetoes entries. A valid
+model veto cannot block a rule exit, but missing/invalid model output blocks automated execution
+and degrades readiness. Risk checks still apply to exits, and HALTED blocks every automated order.
+Positions exceeding journaled strategy ownership cannot be sold automatically.
 
-Default caps: 1% equity per new order, 2% per symbol, 4% total exposure, two entry attempts
+Default caps: the smaller of $1,000 and 1% equity per new order, 2% per symbol, 4% total exposure, two entry attempts
 per symbol per UTC day, 1% observed daily-loss halt, 2% observed peak drawdown halt. No margin
 or shorting. IOC limit prices cap execution price; orders can fill partially or not at all.
 The loss reference is the first observed equity in each UTC day, not a fabricated midnight
@@ -88,6 +90,8 @@ mark. Loss latches persist across restart and day rollover. Halts do not guarant
 | `uv run glitter-cycle` | One reconciliation/decision cycle for an external scheduler |
 | `uv run glitter-halt` | Persist HALTED, then request cancellation of open paper orders |
 | `uv run glitter-experiment` | Paired rule-versus-agent analysis and isolated model comparison |
+| `uv run glitter-public-replay` | Public historical entry-vetting and model comparison; no private context or orders |
+| `uv run glitter-commission` | Explicit public-context paper plumbing probe, at most $2 entry; requires flat account and enabled execution |
 | `uv run glitter-report` | Export broker orders, activities, equity, benchmark and journal |
 | `uv run pytest` | Unit, failure-injection, API and experiment tests |
 
@@ -129,3 +133,8 @@ not send the assessment email. A workflow does not replace the required actual 3
 The implementation does not claim exactly-once execution across PostgreSQL and Alpaca. It
 commits intent first, makes one application-controlled POST attempt, and preserves ambiguous
 outcomes for lookup/recovery. It prefers a blocked entry to an unverified duplicate.
+
+`/healthz` reports process liveness. Authenticated `/readyz` reports worker/database readiness,
+including stale cycles, model errors and uncertain submissions; liveness alone is insufficient.
+See [the pre-submission review](docs/PRE_SUBMISSION_REVIEW.md) for actual passes, incidents and
+remaining assessment requirements. An operational probe is not a strategy performance result.

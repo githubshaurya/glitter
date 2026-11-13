@@ -131,3 +131,19 @@ def test_live_endpoint_and_transaction_pooler_rejected():
         Settings(_env_file=None, alpaca_base_url="https://api.alpaca.markets")
     with pytest.raises(ValueError):
         Settings(_env_file=None, database_url="postgresql://a:b@host:6543/postgres")
+
+
+@pytest.mark.parametrize("metadata_grid", ["0.000000001", "0.025"])
+def test_limit_grid_respects_cent_and_asset_precision(
+    settings, account, quote, asset, control, metadata_grid
+):
+    asset["price_increment"] = metadata_grid
+    quote.ask = Decimal("100.023456789")
+    proposal = Candidate(
+        cutoff=AT.replace(minute=0), id="precision", symbol="BTC/USD", action="BUY", rule="test"
+    )
+    result = assess(settings, proposal, account, quote, asset, control, [], 0, AT)
+    assert result.allowed
+    price = Decimal(result.payload["limit_price"])
+    assert price % Decimal(".01") == 0
+    assert price % Decimal(metadata_grid) == 0

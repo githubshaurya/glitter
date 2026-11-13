@@ -5,9 +5,10 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from trading.accounting import round_trips
 from trading.broker import AlpacaBroker
 from trading.config import Settings
-from trading.models import canonical_symbol, now_utc, timestamp
+from trading.models import now_utc, timestamp
 from trading.repository import TABLES, Repository, safe_json
 
 
@@ -22,77 +23,9 @@ def performance(points):
         peak = max(peak, value)
         drawdown = max(drawdown, 1 - value / peak)
     return {
-        "return": str(values[-1] / values[0] - 1),
+        "return": str(values[-1] / values[0] - 1) if len(values) >= 2 else None,
         "max_drawdown": str(drawdown),
         "observations": len(points),
-    }
-
-
-def round_trips(activities, start, end):
-    """Actual fill-based long-only round trips, grouping partial fills and partial exits.
-
-    Gross P&L is explicitly separate from fees. Fee attribution cannot be guessed from a
-    date-only CFEE; missing opening inventory makes that symbol's win rate unavailable.
-    """
-    fills = [a for a in activities if a.get("activity_type") == "FILL"]
-    fills.sort(key=lambda a: (a["transaction_time"], a["id"]))
-    inventory, completed, incomplete = {}, [], set()
-    for fill in fills:
-        symbol = canonical_symbol(fill["symbol"])
-        if symbol in incomplete:
-            continue
-        quantity = Decimal(fill["qty"])
-        notional = quantity * Decimal(fill["price"])
-        current = inventory.setdefault(
-            symbol,
-            {
-                "qty": Decimal(0),
-                "cost": Decimal(0),
-                "proceeds": Decimal(0),
-                "started_at": fill["transaction_time"],
-            },
-        )
-        if fill["side"] == "buy":
-            current["qty"] += quantity
-            current["cost"] += notional
-        else:
-            if quantity > current["qty"]:
-                incomplete.add(symbol)
-                continue
-            current["qty"] -= quantity
-            current["proceeds"] += notional
-            if current["qty"] == 0:
-                closed_at = timestamp(fill["transaction_time"])
-                if start <= closed_at <= end:
-                    completed.append(
-                        {
-                            "symbol": symbol,
-                            "started_at": current["started_at"],
-                            "closed_at": fill["transaction_time"],
-                            "gross_pnl": str(current["proceeds"] - current["cost"]),
-                        }
-                    )
-                del inventory[symbol]
-    fee_events = [a for a in activities if a.get("activity_type") in {"CFEE", "FEE"}]
-    # Crypto fees can alter inventory in the credited coin. Without order-level fee attribution,
-    # we cannot certify a closed-round-trip count from fill quantities alone.
-    fee_quantity_symbols = {
-        canonical_symbol(a["symbol"])
-        for a in fee_events
-        if a.get("symbol") and Decimal(str(a.get("qty") or "0")) != 0
-    }
-    unavailable = incomplete | fee_quantity_symbols
-    verified = [t for t in completed if t["symbol"] not in unavailable]
-    return {
-        "completed_round_trips": len(verified),
-        "gross_win_rate": sum(Decimal(t["gross_pnl"]) > 0 for t in verified) / len(verified)
-        if verified
-        else None,
-        "net_win_rate": None,
-        "round_trips": verified,
-        "unavailable_symbols": sorted(unavailable),
-        "fee_events": len(fee_events),
-        "note": "Win rate is gross before fees; net win rate unavailable without complete fee attribution. Symbols with unknown opening inventory or coin-denominated fee adjustments are excluded, never guessed.",
     }
 
 
@@ -158,7 +91,7 @@ def export_report(settings, repository, broker):
         start - timedelta(microseconds=1), end + timedelta(microseconds=1)
     )
     # All earlier fills are necessary to reconstruct opening inventory honestly.
-    all_activities = broker.activities_between(datetime(2000, 1, 1, tzinfo=UTC), end)
+    all_activities = broker.activities_between(datetime(2000, 1, 1, tzinfo=UTC), now_utc())
     history = broker.portfolio_history(start, end)
     points = [
         {"time": datetime.fromtimestamp(t, UTC).isoformat(), "equity": str(value)}
@@ -211,12 +144,26 @@ def export_report(settings, repository, broker):
             elif start.date() <= datetime.fromisoformat(value).date() <= end.date():
                 date_only_activities.append(item)
     trips = round_trips(all_activities, start, end)
+    external_flows = [
+        item
+        for item in [*activities, *date_only_activities]
+        if item.get("activity_type") in {"CSD", "CSW", "ACATC", "ACATS"}
+    ]
+    portfolio = performance(points)
+    if external_flows:
+        portfolio["unadjusted_equity_change"] = portfolio["return"]
+        portfolio["return"] = None
+        portfolio["reason"] = (
+            "External cash/asset flow in the window; simple equity change is not a strategy return"
+        )
     fills = [a for a in activities if a.get("activity_type") == "FILL"]
     order_ids = {a["order_id"] for a in fills if a.get("order_id")}
     metrics = {
         "window_requested": {"start": start.isoformat(), "end": end.isoformat()},
         "equity_source": source,
-        "portfolio": performance(points),
+        "portfolio": portfolio,
+        "external_flow_activities": len(external_flows),
+        "fee_export_as_of": now_utc().isoformat(),
         "btc_buy_and_hold": performance([{"equity": b["price"]} for b in benchmark]),
         "orders": len(orders),
         "filled_order_count": len(order_ids),
@@ -269,6 +216,7 @@ Equity source: {source}. Actual aligned window: {metrics["actual_window"]}.
 | Broker orders / filled orders / fill activities | {len(orders)} / {len(order_ids)} / {len(fills)} |
 | Verified completed round trips | {trips["completed_round_trips"]} |
 | Gross closed-trade win rate | {pct(str(trips["gross_win_rate"]) if trips["gross_win_rate"] is not None else None)} |
+| Net closed-trade win rate, as of exported fees | {pct(str(trips["net_win_rate"]) if trips["net_win_rate"] is not None else None)} |
 
 {trips["note"]}
 

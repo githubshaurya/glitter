@@ -99,3 +99,28 @@ No custom database migration engine is introduced for this initial schema. `init
 the initial tables; future schema changes require an explicit reviewed migration, not create_all
 as an upgrade mechanism. Docker volume persistence and hosted database backups are operational
 responsibilities, not properties conferred by using an ORM.
+
+## Pre-submission hardening
+
+The final payload respects an absolute USD cap as well as equity/exposure caps. A conservative
+cent price grid also respects the asset metadata grid. Broker responses must match client ID,
+symbol, side, type, TIF, quantity and limit; fill quantity/average must remain consistent.
+Original uncertain-response diagnostics survive later lookup misses. Existing intents return
+their saved outcome without another POST.
+
+After acquiring the exclusive worker lock, interrupted RUNNING records become ABANDONED;
+claimed slots are not replayed. A separate readiness endpoint fails on stale/failed cycles and
+uncertain orders; public health remains liveness only. The dashboard lists small observation
+headers and queries exact decision traces, rather than transferring every 300-bar history on
+every refresh. Agent request IDs separate live decisions, commissioning, replays and models.
+
+Private context is an allowlist with account/order identifiers excluded; arbitrary local audit
+fields cannot flow into tools. Valid SELL verdicts may be overridden for risk reduction, but
+missing/invalid model output stops automated execution. An explicit operational commissioning
+probe is separately labeled, public-context-only, capped at $2, flat-account-only, and excluded
+from the strategy window. No MCP server is needed for these in-process bounded tools.
+
+Fill/fee accounting uses exact Decimal inventory and cash movements; linked fees are attached
+to the last fill of their order, date-only coin fees are applied conservatively on their
+accounting date, and ambiguous attribution stays unavailable. Partial exits do not become
+multiple completed trades. Late-posted fees make net outcomes provisional as of export.

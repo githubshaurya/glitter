@@ -2,9 +2,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 
-import pytest
-from sqlalchemy.exc import IntegrityError
-
 from tests.conftest import AT
 from trading.execution import ExecutionService
 from trading.models import Candidate
@@ -29,8 +26,7 @@ def test_approval_changes_submission(settings, locked_repository, broker, monkey
     assert broker.submitted == []
     assert execution.execute(proposal, decision_id, True)["state"] == "filled"
     assert len(broker.submitted) == 1
-    with pytest.raises(IntegrityError):
-        execution.execute(proposal, decision_id, True)
+    assert execution.execute(proposal, decision_id, True)["replayed"]
     assert len(broker.submitted) == 1
 
 
@@ -66,7 +62,16 @@ def test_crash_before_submission_never_retries(settings, repository, broker):
 def test_partial_fill_remains_unresolved(settings, repository, broker):
     decision_id = create_decision(repository)
     repository.save_intent(
-        decision_id, {"client_order_id": "partial", "symbol": "BTC/USD", "side": "buy", "qty": "1"}
+        decision_id,
+        {
+            "client_order_id": "partial",
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "qty": "1",
+            "type": "limit",
+            "limit_price": "100",
+            "time_in_force": "ioc",
+        },
     )
     broker.orders["partial"] = {
         "id": "a",
@@ -75,6 +80,10 @@ def test_partial_fill_remains_unresolved(settings, repository, broker):
         "side": "buy",
         "status": "partially_filled",
         "filled_qty": ".3",
+        "qty": "1",
+        "type": "limit",
+        "limit_price": "100",
+        "time_in_force": "ioc",
     }
     ExecutionService(settings, repository, broker).reconcile()
     assert repository.unresolved()[0]["broker"]["filled_qty"] == ".3"
