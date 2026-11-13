@@ -17,7 +17,15 @@
 - No three-day unattended run, profitability result or completed financial experiment is claimed.
 - No external database, public dashboard, GitHub secret or trading enable variable was provisioned.
 - Docker image build was not run locally because Docker is unavailable here.
-- Local browser rendering was blocked by environment sockets; remote browser CI pending.
+- Local browser rendering was blocked by environment sockets; remote desktop/mobile checks passed.
 
-The complete CI workflow checks SQLite, PostgreSQL and desktop/mobile synthetic UI flows.
-Record the observed remote run URL and conclusion here after the push.
+## Observed remote CI
+
+[Successful run](https://github.com/githubshaurya/glitter/actions/runs/43381317121), source
+58ef2ac5568882124f29fbbac2876c9769c5fe8a: 43 SQLite tests, 43 PostgreSQL tests, lint,
+formatting, frontend syntax and two desktop/mobile browser tests passed. Browser tests use
+synthetic data, not invented portfolio results. Screenshot artifacts are retained with the run.
+The first run's unsupported OS/browser combination was fixed by pinning Ubuntu 24.04.
+
+The workflow additionally builds/boots the Docker image and checks health, index serving and
+API authentication. That newly added smoke check is pending its first observed run.

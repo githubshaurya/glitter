@@ -23,3 +23,7 @@ CI instead. Do not label those checks passed until their workflow result is obse
 
 Future entries: record deployment time, each actual order, every incident/fix, actual provider
 costs and configuration/version changes. Do not retroactively write model rationales.
+
+2026-11-13T06:50Z: remote CI on the pinned platform passed 43 tests for each database,
+lint/formatting/JS syntax and two browser tests (desktop/mobile), including control interaction.
+No account credentials were used in CI. Added a Docker image build/start/auth smoke check.
