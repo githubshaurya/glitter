@@ -61,3 +61,10 @@ unattended-run claim. No fees, completed trades, private-context execution or 3-
 Final local pre-submission checks: 84 tests passed on SQLite and 84 on real PostgreSQL;
 Ruff, formatting, JS syntax, frozen lock check and credential-value source scan passed.
 Remote CI for the hardened code must be observed before claiming its browser/Docker checks.
+
+2026-11-13T15:04Z: hardened-code CI 43448651072 passed 84 tests per database, both browser
+tests and Docker startup/auth/readiness/persistence through container replacement. Source
+commit cccd4d1c92d7ecc31636ffe3d5696972e2076a49. No brokerage keys used in CI. Reopened
+real local journal (HALTED, one UNKNOWN, both execution and private context disabled), and
+made a consistent online SQLite backup. Local uvicorn startup succeeded; cross-command
+loopback inspection failed in this workspace, so no local HTTP latency numbers are claimed.

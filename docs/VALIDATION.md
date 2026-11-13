@@ -1,8 +1,7 @@
 # Validation status
 
 Current detailed assessment: [pre-submission review](PRE_SUBMISSION_REVIEW.md) and
-[measured public-data experiments](EXPERIMENT_RESULTS.md). The expanded CI result is pending
-until its commit workflow is observed; older runs below remain historical evidence.
+[measured public-data experiments](EXPERIMENT_RESULTS.md). The expanded CI passed; older runs below remain historical evidence.
 
 ## Observed locally
 
@@ -40,3 +39,20 @@ The [final code verification run](https://github.com/githubshaurya/glitter/actio
 for 26bc8dfbf7f71f34424ee5a175cec8e3ce754c40 passed every stage, including both database
 suites, both browser tests, Docker image build/start, health and index serving, and unauthenticated
 API rejection. Docker verification used a synthetic dashboard token and no brokerage keys.
+
+## Hardened-code verification
+
+[CI run 43448651072](https://github.com/githubshaurya/glitter/actions/runs/43448651072),
+commit cccd4d1c92d7ecc31636ffe3d5696972e2076a49: **success**. Logs confirm 84 SQLite tests,
+84 PostgreSQL tests, both browser tests, lint/format/JS and frozen dependency installation.
+Docker built and started from the documented image, rejected unauthenticated requests,
+returned failed readiness without broker credentials, persisted HALTED despite broker
+initialization failure, then preserved that mode after container replacement using its volume.
+No real account credentials were supplied to CI. A successful liveness response alone was
+not counted as worker readiness. Public-market experiment results are in EXPERIMENT_RESULTS.md.
+
+The real local journal was independently reopened: HALTED, one UNKNOWN, execution disabled,
+private context disabled. An online SQLite backup was made with journal events verified.
+A local server started successfully, but cross-command loopback inspection was refused in
+this workspace; no local HTTP latency result is claimed. Remote browser/Docker checks above
+provide the observed HTTP evidence. No unattended process is claimed to be deployed here.

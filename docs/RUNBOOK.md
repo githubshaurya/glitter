@@ -67,3 +67,20 @@ learnings, actual operating costs and incident explanations for the operator to 
 
 No email is sent, no public dashboard is deployed, and no remote database is provisioned by these
 commands. For remote access, put the authenticated dashboard behind TLS and restrict access.
+
+## Current commissioning incident and database continuity
+
+The 2026-11-13 local journal remains HALTED with one UNKNOWN paper commissioning intent.
+Execution and private context are disabled. The current journal is `data/glitter.db`; a consistent
+online backup is in `reports/latest/journal-backup.sqlite3`. Keep its incident history.
+
+Default Compose uses a named Docker volume, while a host `uv` command uses the root `.env`
+SQLite path. Those are different physical databases. Do not switch writers or enable a fresh
+Docker volume to get around the current UNKNOWN. Restore the reviewed journal/backup into
+the intended persistent volume, or migrate to one reviewed persistent PostgreSQL database,
+while all writers are stopped. Verify controls, intent states and ownership after migration.
+Do not start two physical journals against the same paper account.
+
+Before assessment submission, walk through PRE_SUBMISSION_REVIEW.md, the independent paper
+dashboard, export coverage, late fees, the results draft and actual bills. The public replay
+results do not establish that the missing account-aware run has completed.

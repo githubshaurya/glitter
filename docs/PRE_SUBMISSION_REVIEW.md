@@ -6,7 +6,7 @@ This document distinguishes evidence from implementation and deployment assumpti
 
 | Assessment requirement | Evidence / remaining work |
 |---|---|
-| One-command service | Docker workflow builds/starts the image, serves UI and checks authentication; expanded workflow also verifies persisted HALTED after container replacement. Inspect the associated CI result before calling the expanded check passed. |
+| One-command service | Docker workflow builds/starts the image, serves UI and checks authentication; expanded workflow also verifies persisted HALTED after container replacement. Passed in [CI 43448651072](https://github.com/githubshaurya/glitter/actions/runs/43448651072). |
 | Real bounded agent | Public-data Groq tool calls work. Private account-aware cycle was rejected by automatic approval review; explicit transfer consent remains required. |
 | Real paper order and fills | A public-only, at-most-$2 operational probe reached UNKNOWN after one POST attempt. Broker lookup and exported orders found no order. No fill or successful lifecycle is claimed. |
 | Restart and ambiguity recovery | Separate OS process SIGKILL before POST and after simulated acceptance, new repository/process connections and broker lookup; no second POST. These broker records are simulated, not actual Alpaca acceptance. |
@@ -59,3 +59,7 @@ Official references: [order precision](https://docs.alpaca.markets/us/docs/order
 [crypto fees](https://docs.alpaca.markets/us/docs/crypto-fees),
 [activities](https://docs.alpaca.markets/us/docs/account-activities),
 [activity API](https://docs.alpaca.markets/us/reference/getaccountactivities-2).
+
+Verification: **84 tests passed on each database**, two browser tests and the expanded Docker
+checks passed on commit cccd4d1c92d7ecc31636ffe3d5696972e2076a49. These passing tests do
+not change the unresolved broker incident or elapsed-run release gates.
