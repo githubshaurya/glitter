@@ -50,4 +50,5 @@ and Python 3.12. This is a setup failure, not a claimed passing UI test.
 The remote image built successfully. The first HTTP health probe encountered a connection
 reset while the newly launched container was starting; curl's original retry flags covered
 refused connections but not resets. Expanded retries for this idempotent readiness GET and
-added an exit trap to retain container logs and clean up. Startup/auth checks await the rerun.
+added an exit trap to retain container logs and clean up. The rerun passed Docker startup,
+health, index serving and API authentication checks.

@@ -27,3 +27,9 @@ costs and configuration/version changes. Do not retroactively write model ration
 2026-11-13T06:50Z: remote CI on the pinned platform passed 43 tests for each database,
 lint/formatting/JS syntax and two browser tests (desktop/mobile), including control interaction.
 No account credentials were used in CI. Added a Docker image build/start/auth smoke check.
+
+Final verification: [CI run 43382147168](https://github.com/githubshaurya/glitter/actions/runs/43382147168)
+passed both 43-test database suites, both desktop/mobile tests and Docker build/start/health/auth
+checks. Inspected CI screenshots. Also verified GPT-OSS 20B on the stored public commissioning
+context (HOLD; 1,770 tokens; one 8.94-second sample). No actual order, three-day run or financial
+experiment result is claimed. Private account-context execution remains disabled pending consent.
