@@ -37,3 +37,10 @@ The test environment rejects Unix sockets. PostgreSQL tests succeeded using TCP 
 test-only instance. Local Chromium's process-singleton socket still failed; cloud browser access
 to the local preview was refused. Browser UI checks are configured in remote CI with synthetic,
 explicitly labeled test data. This is not evidence that the application itself cannot run a browser.
+
+## First CI: runner OS drift
+
+The first remote CI run passed all 43 SQLite tests and all 43 PostgreSQL tests, plus lint,
+formatting and JS syntax. Browser installation failed: ubuntu-latest had advanced to Ubuntu
+26.04, unsupported by the pinned Playwright version. Pinned the test runner to Ubuntu 24.04
+and Python 3.12. This is a setup failure, not a claimed passing UI test.

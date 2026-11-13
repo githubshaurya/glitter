@@ -4,7 +4,7 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     services:
       postgres:
@@ -20,6 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.8.15'
+          python-version: '3.12'
           enable-cache: true
       - run: uv sync --frozen --group dev
       - run: uv run ruff check .
