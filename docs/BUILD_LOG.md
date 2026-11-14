@@ -1,5 +1,18 @@
 # Build log
 
+14 November 2026 (Asia/Kolkata): reviewed the new interviewer requirements reported by the
+user and current official Alpaca, PostgreSQL, Kafka, Redis, vLLM and WebSocket documentation.
+Added a separate realtime target design, database/workflow/failure matrix and ordered execution
+brief. Corrected the assumption that multiple Alpaca sockets are generally available or make
+missed data recoverable. This is design work only; no stream runtime, local model hosting,
+broker fill, new realtime test pass or unattended deployment is claimed by this documentation.
+
+14 November 2026, 13:40 IST: bounded actual Alpaca crypto/us WebSocket capability probe
+authenticated, confirmed BTC/USD and ETH/USD quote/bar/updated-bar subscriptions, received
+three quote events and closed. Public market data only; no order or private model transfer.
+Retained sanitized metadata. This proves basic connectivity/subscription only, not streaming
+runtime implementation or the proposed 120-second recovery behavior.
+
 Dates/times below are UTC. Entries record work actually performed with ChatGPT/Codex and
 connected GitHub tools, official documentation, Python/uv, pytest/Ruff and local PostgreSQL.
 They are not an invented unattended trading history.

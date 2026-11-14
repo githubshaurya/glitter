@@ -129,6 +129,7 @@ not send the assessment email. A workflow does not replace the required actual 3
 - [Operating and recovery procedures](docs/RUNBOOK.md)
 - [Timestamped build log](docs/BUILD_LOG.md) and [incidents](docs/INCIDENTS.md)
 - [Validation status](docs/VALIDATION.md)
+- [Realtime target design and failure analysis](docs/REALTIME_SYSTEM_DESIGN.md) and [implementation brief](docs/REALTIME_IMPLEMENTATION_BRIEF.md) — proposed replacement architecture, not implemented streaming capability
 
 The implementation does not claim exactly-once execution across PostgreSQL and Alpaca. It
 commits intent first, makes one application-controlled POST attempt, and preserves ambiguous
