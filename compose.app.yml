@@ -1,0 +1,62 @@
+name: glitter-council-app
+
+services:
+  kafka:
+    extends:
+      file: docker-compose.yml
+      service: kafka
+    ports: !reset []
+
+  postgres:
+    extends:
+      file: docker-compose.yml
+      service: postgres
+    ports: !reset []
+
+  kafka-init:
+    extends:
+      file: docker-compose.yml
+      service: kafka-init
+    volumes: !reset []
+
+  migrate:
+    extends:
+      file: docker-compose.yml
+      service: migrate
+    volumes: !reset []
+
+  app:
+    build:
+      context: .
+      target: viewer
+    image: glitter-council-app:local
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp
+    environment:
+      TRADER_VIEWER_PORT: ${APP_PORT:-8765}
+      ALPACA_PAPER_KEY_ID: ${ALPACA_PAPER_KEY_ID:-}
+      ALPACA_PAPER_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LLM_PROFILE_LIVE: ${LLM_PROFILE_LIVE:-primary}
+      LLM_PROFILE_SHADOW: ${LLM_PROFILE_SHADOW:-}
+      EXECUTION_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${APP_PORT:-8765}:${APP_PORT:-8765}"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['TRADER_VIEWER_PORT'] + '/api/simulations', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  kafka-data:
+  pg-data:

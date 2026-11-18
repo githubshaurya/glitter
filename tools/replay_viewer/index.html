@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Council replay</title>
+  <link rel="stylesheet" href="/viewer.css">
+  <script src="/viewer.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="frame masthead-inner"><span>GLITTER / TRADING LAB</span><nav class="mode-switch" aria-label="Workspace">
+      <button type="button" id="show-simulation" aria-pressed="true">Simulation</button>
+      <button type="button" id="show-analysis" aria-pressed="false">New analysis</button>
+      <button type="button" id="show-history" aria-pressed="false">History</button>
+      <button type="button" id="show-replay" aria-pressed="false">Saved replay</button>
+    </nav></div>
+  </header>
+  <main class="frame">
+    <section class="intro" aria-labelledby="title">
+      <div><h1 id="title">Intraday simulation</h1><p id="run-description">Replay a past market window with the trading council.</p></div>
+      <dl id="metrics" class="metrics" aria-label="Replay results"></dl>
+    </section>
+    <section id="simulation" aria-label="Intraday simulation">
+      <form id="simulation-form">
+        <div class="scenario-fields simulation-fields">
+          <label>NASDAQ ticker<input name="symbol" placeholder="NVDA" pattern="[A-Za-z][A-Za-z0-9.\-]{0,11}" maxlength="12" required></label>
+          <label>Trading date<input type="date" name="day" required></label>
+          <label>Start time (ET)<input type="time" name="market_time" value="10:30" required></label>
+          <label>Minutes<input type="number" name="duration_minutes" min="1" max="20" value="20" required></label>
+          <label>Starting cash ($)<input type="number" name="budget_usd" min="0.01" max="100000000" step="0.01" value="4000" required></label>
+        </div>
+        <div class="form-footer">
+          <button class="run-button" type="submit">Run simulation</button>
+          <p id="simulation-status" class="quiet" role="status"></p>
+        </div>
+      </form>
+      <div class="simulation-desk">
+        <nav aria-label="Simulation history" class="simulation-rail">
+          <h3>Simulation history</h3>
+          <div id="simulation-list" class="history-list"></div>
+        </nav>
+        <article class="simulation-sheet" aria-labelledby="simulation-run-title">
+          <div id="simulation-report"><h3 id="simulation-run-title">Trade history</h3><p class="quiet">Run a simulation to see its orders, fills, and decisions here.</p></div>
+          <div id="simulation-audit"></div>
+        </article>
+      </div>
+    </section>
+    <section id="analysis-controls" class="analysis-controls" aria-label="Analysis setup" hidden>
+      <form id="analysis-form">
+        <div class="scenario-fields">
+          <label>NASDAQ ticker<input name="symbol" placeholder="AMD" pattern="[A-Za-z][A-Za-z0-9.\-]{0,11}" maxlength="12" required></label>
+          <label>Market data<select name="mode" id="data-mode"><option value="historical">Historical</option><option value="latest">Latest market (IEX)</option></select></label>
+          <label id="date-field">Trading date<input type="date" name="day" required></label>
+          <label id="time-field">Decision time (ET)<input type="time" name="market_time" value="10:30" step="60" required></label>
+          <label>Investment budget ($)<input type="number" name="budget_usd" min="0" max="100000000" step="0.01" value="1000" required></label>
+          <label>Shares already held<input type="number" name="held_shares" min="0" max="1000000" step="1" value="0" required></label>
+        </div>
+        <div class="form-footer">
+          <button class="run-button" type="submit">Run council</button>
+          <p id="analysis-status" class="quiet" role="status"></p>
+        </div>
+        <p id="mode-help" class="quiet">Enter holdings for this scenario. The paper account equity supplies the sizing reference.</p>
+      </form>
+      <aside class="account-card" aria-label="Alpaca paper account">
+        <div class="section-head"><h3>Alpaca paper account</h3><button id="refresh-account" type="button" class="text-button">Refresh</button></div>
+        <dl id="account"><div><dt>Total equity</dt><dd>Loading…</dd></div></dl>
+        <p id="account-status" class="quiet" role="status"></p>
+      </aside>
+    </section>
+    <p id="error" class="error" role="alert" hidden></p>
+    <div id="desk" class="desk" hidden>
+      <nav id="replay-rail" class="rail" aria-label="Replay timeline">
+        <label for="day">Trading session</label>
+        <select id="day"></select>
+        <div id="timeline" class="timeline" aria-label="Decision cycles"></div>
+      </nav>
+      <nav id="history-rail" class="rail history-rail" aria-label="Saved decisions" hidden>
+        <label for="history-search">Filter by ticker or company</label>
+        <input id="history-search" type="search" autocomplete="off" placeholder="Search stocks">
+        <p id="history-status" class="quiet" role="status"></p>
+        <div id="history-list" class="history-list"></div>
+      </nav>
+      <article id="decision-sheet" class="sheet" aria-labelledby="cycle-title">
+        <div class="cycle-header">
+          <div><p id="cycle-date" class="eyebrow"></p><h2 id="cycle-title"></h2></div>
+          <div id="cycle-badges" class="badges" aria-live="polite"></div>
+        </div>
+        <section id="cycle-detail" aria-label="Selected decision">
+          <section id="recommendation" class="recommendation" aria-label="Share recommendation" hidden></section>
+          <section id="history-chair" class="decision-section chair-section" aria-labelledby="chair-title" hidden>
+            <h3 id="chair-title">Chair review</h3>
+            <dl id="chair-path" class="chair-path"></dl>
+            <p id="chair-verdict" class="quiet"></p>
+            <div id="chair-response"></div>
+          </section>
+          <div class="market">
+            <section class="chart-block" aria-labelledby="price-title">
+              <div class="section-head"><h3 id="price-title">Evidence at decision time</h3>
+                <div class="segmented" aria-label="Candle window">
+                  <button type="button" data-window="5" aria-pressed="false">5 min</button>
+                  <button type="button" data-window="10" aria-pressed="true">10 min</button>
+                </div>
+              </div>
+              <p id="chart-caption" class="quiet"></p>
+              <canvas id="candles" aria-label="Recorded candlestick prices" role="img"></canvas>
+              <details><summary>Candle and feature values</summary><div id="feature-data"></div></details>
+              <section id="pattern" class="scenario-news" aria-label="Intraday candlestick setup" hidden></section>
+              <section id="scenario-news" class="scenario-news" aria-label="Alpaca news" hidden></section>
+            </section>
+            <dl class="key-features" id="key-features" aria-label="Key features"></dl>
+          </div>
+          <section class="decision-section" aria-labelledby="council-title">
+            <div class="section-head"><h3 id="council-title">Council rationales</h3><span class="quiet">Recorded explanations</span></div>
+            <div id="decision-trace"></div>
+            <div id="roles"></div>
+            <div id="attempts"></div>
+          </section>
+          <section class="decision-section" aria-labelledby="execution-title">
+            <div class="section-head"><h3 id="execution-title">Risk and simulated execution</h3></div>
+            <div id="execution"></div>
+          </section>
+        </section>
+      </article>
+    </div>
+  </main>
+</body>
+</html>

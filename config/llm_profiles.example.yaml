@@ -1,0 +1,47 @@
+# Copy to config/llm_profiles.yaml (gitignored) and fill in the model(s) YOU want.
+#
+# A model is an INPUT, not code. No model name appears anywhere in src/. Each profile is:
+#   provider      anthropic | openai_compat   (add more with trader.llm.factory.register_provider)
+#   model         the provider's model id/name, exactly as that provider documents it
+#   base_url      only for openai_compat: the server's OpenAI-compatible root (…/v1)
+#   api_key_env   NAME of the environment variable holding the key (never the key itself)
+#   tool_calling  native | json_prompt   (json_prompt = for open models without native tool calling)
+#   options       passed straight through to the provider's request (temperature, thinking, extra_body, ...)
+#                   structured_outputs: true enables strict council response schemas on compatible endpoints
+#                   anthropic:      prompt_caching: true|false
+#                   openai_compat:  max_tokens_param: max_tokens | max_completion_tokens
+#   pricing       USD per million tokens (input / output / cache_read / cache_write). Used for cost
+#                 reporting and the per-variant daily spend cap. Leave 0 for local models.
+#
+# Which profile runs is chosen by LLM_PROFILE_LIVE in .env and can be switched at runtime:
+#   tradectl set-model live <profile-name>
+profiles:
+  primary:
+    provider: anthropic
+    model: "<paste-a-model-id-here>"
+    api_key_env: ANTHROPIC_API_KEY
+    options:
+      prompt_caching: true
+    pricing: { input: 0, output: 0, cache_read: 0 }   # fill in from the provider's price list
+    timeout_seconds: 90
+
+  # Open-source model served locally by Ollama (Docker Desktop reaches the host via host.docker.internal).
+  # Other OpenAI-compatible servers work the same way: vLLM, LM Studio, llama.cpp server, OpenRouter, Groq, Together ...
+  local:
+    provider: openai_compat
+    model: "<ollama-model-name, e.g. whatever `ollama list` shows>"
+    base_url: http://host.docker.internal:11434/v1
+    api_key_env: LOCAL_LLM_API_KEY
+    tool_calling: native        # switch to json_prompt if the model can't do native tool calls
+    options: {}
+    pricing: { input: 0, output: 0 }
+    timeout_seconds: 240        # local models are slower: keep this below the cycle TTL budget
+
+  # Hosted OpenAI-compatible example (OpenRouter, Groq, OpenAI, ...)
+  # hosted_oss:
+  #   provider: openai_compat
+  #   model: "<model slug>"
+  #   base_url: https://openrouter.ai/api/v1
+  #   api_key_env: OPENAI_API_KEY
+  #   options: { max_tokens_param: max_tokens }
+  #   pricing: { input: 0, output: 0 }

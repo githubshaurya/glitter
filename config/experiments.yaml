@@ -1,0 +1,28 @@
+# Experiment variants. Every variant consumes the SAME immutable cycle snapshots from Kafka (its own consumer
+# group), so differences between variants are caused by the variant, not by different data or timing.
+#
+#   strategy   agent | rule
+#   llm_profile  name from config/llm_profiles.yaml (None => LLM_PROFILE_LIVE, switchable at runtime)
+#   prompt     file in config/prompts/ (without .md)
+#   tools      list of tool names, or omitted for all tools
+#   output     live     -> lane 'live'      (agent, paper account #1)
+#              baseline -> lane 'baseline'  (rule strategy, paper account #2)
+#              shadow   -> lane 'shadow'    (never reaches a broker; simulated by shadow-ledger)
+variants:
+  live:
+    strategy: agent
+    output: live
+    description: "Production agent on paper account #1"
+
+  # E1: the same strategy WITHOUT the agent. Trades paper account #2 for broker-verified P&L.
+  rule-baseline:
+    strategy: rule
+    output: baseline
+    description: "E1 baseline: plain rule strategy on paper account #2"
+
+  # E2: a different model on identical inputs, in shadow (set llm_profile to a profile you defined).
+  shadow-b:
+    strategy: agent
+    llm_profile: shadow_b
+    output: shadow
+    description: "E2: model B in shadow on identical snapshots"

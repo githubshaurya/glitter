@@ -1,0 +1,309 @@
+# One command:   docker compose up -d --build
+#
+# Default stack = the live path (agent -> risk gate -> executor -> Alpaca PAPER) + Kafka + Postgres.
+# Experiments are compose profiles:   docker compose --profile baseline --profile shadow up -d
+#   baseline  rule strategy on a 2nd Alpaca paper account (needs ALPACA_BASELINE_* in .env)   [experiment E1]
+#   shadow    second model on identical snapshots, simulated only (needs the profile in llm_profiles.yaml) [E2]
+#   ui        Kafka UI on http://localhost:8080
+#
+# config/ is bind-mounted read-only: edit config/settings.yaml (risk limits), experiments.yaml or
+# llm_profiles.yaml and `docker compose restart <service>`: no rebuild.
+
+x-app: &app
+  build: .
+  image: trader:local
+  environment: &app-env
+    KAFKA_BOOTSTRAP: kafka:9092
+    DATABASE_URL: postgresql+psycopg://trader:${POSTGRES_PASSWORD:-trader}@postgres:5432/trader
+    TRADER_CONFIG_DIR: /app/config
+    TRADER_STATE_DIR: /app/state             # halt file: a kill switch that works with Postgres down
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    REALTIME_ENABLED: ${REALTIME_ENABLED:-false}
+    MANAGED_PAPER_ENABLED: ${MANAGED_PAPER_ENABLED:-false}
+  volumes:
+    - ./config:/app/config:ro
+    - ./state:/app/state                    # shared with the host: `tradectl halt` works from either side
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # reach a local Ollama / LM Studio / vLLM on the host
+  restart: unless-stopped
+  logging: &logs                              # bounded: an unattended multi-day run must not fill the disk
+    driver: json-file
+    options: {max-size: "20m", max-file: "5"}
+  stop_grace_period: 30s                      # let consumers finish the in-flight message and commit
+  depends_on: &app-deps
+    kafka-init:
+      condition: service_completed_successfully
+    migrate:
+      condition: service_completed_successfully
+
+x-paper: &paper-env
+  ALPACA_PAPER_KEY_ID: ${ALPACA_PAPER_KEY_ID:-}
+  ALPACA_PAPER_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY:-}
+
+x-baseline: &baseline-env
+  ALPACA_BASELINE_KEY_ID: ${ALPACA_BASELINE_KEY_ID:-}
+  ALPACA_BASELINE_SECRET_KEY: ${ALPACA_BASELINE_SECRET_KEY:-}
+
+x-agent: &agent-env
+  <<: *app-env
+  LLM_PROFILE_LIVE: ${LLM_PROFILE_LIVE:-primary}
+  LLM_PROFILE_SHADOW: ${LLM_PROFILE_SHADOW:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  GROQ_BACKUP_API_KEY: ${GROQ_BACKUP_API_KEY:-}
+  LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-ollama}
+
+services:
+  # ------------------------------------------------------------------ infrastructure
+  kafka:
+    logging: *logs
+    image: apache/kafka:4.4.0               # pinned: `latest` lags the newest release
+    hostname: kafka
+    ports:
+      - "127.0.0.1:9094:9094"               # host listener for local `tradectl`
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller   # KRaft: no ZooKeeper
+      KAFKA_LISTENERS: INTERNAL://:9092,HOST://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1          # single node; production would be 3 with min.insync.replicas=2
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"           # topics are created explicitly by kafka-init
+      KAFKA_LOG_RETENTION_HOURS: 720                     # 30 days: the whole window stays replayable
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m                 # image default is 1 GB; keep Docker Desktop light
+    volumes:
+      - kafka-data:/var/lib/kafka/data                   # survives `docker compose down` (offsets + event log)
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  postgres:
+    logging: *logs
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trader}
+      POSTGRES_DB: trader
+    ports:
+      # host port is configurable and deliberately NOT 5432: that is commonly taken by other local Postgres
+      # containers. Services reach Postgres over the compose network on 5432; this is only for host-side tradectl.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5442}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  kafka-init:
+    <<: *app
+    command: ["tradectl", "kafka-init"]
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  migrate:
+    <<: *app
+    command: ["tradectl", "db-init"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------ live path
+  scheduler:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+    command: ["tradectl", "run", "scheduler"]
+    healthcheck: &hc
+      test: ["CMD", "tradectl", "health", "scheduler"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
+
+  features:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+    command: ["tradectl", "run", "features"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "features", "--max-age", "240"]
+
+  market-data:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+      TRADER_TICKS_QUEUE_CAPACITY: ${TRADER_TICKS_QUEUE_CAPACITY:-20000}
+      TRADER_TICKS_BATCH_SIZE: ${TRADER_TICKS_BATCH_SIZE:-250}
+      TRADER_TICKS_FLUSH_SECONDS: ${TRADER_TICKS_FLUSH_SECONDS:-0.25}
+      TRADER_TICKS_RECOVERY_SECONDS: ${TRADER_TICKS_RECOVERY_SECONDS:-15}
+      TRADER_TICKS_OVERLAP_SECONDS: ${TRADER_TICKS_OVERLAP_SECONDS:-120}
+      TRADER_TICKS_INITIAL_LOOKBACK_SECONDS: ${TRADER_TICKS_INITIAL_LOOKBACK_SECONDS:-21600}
+      TRADER_TICKS_MAX_PAGES_PER_PASS: ${TRADER_TICKS_MAX_PAGES_PER_PASS:-16}
+      TRADER_TICKS_RECOVERY_WINDOW_SECONDS: ${TRADER_TICKS_RECOVERY_WINDOW_SECONDS:-300}
+    command: ["tradectl", "run", "market-data"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "market-data"]
+
+  outbox:
+    <<: *app
+    command: ["tradectl", "run", "outbox"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "outbox"]
+
+  paper-run:
+    <<: *app
+    command: ["tradectl", "run", "paper-run"]
+    environment:
+      <<: [*agent-env, *paper-env]
+      TRADER_RUN_DIR: ${TRADER_RUN_DIR:-/app/proof/paper-run-20261117}
+      TRADER_RUN_SESSIONS: ${TRADER_RUN_SESSIONS:-3}
+    volumes:
+      - ./config:/app/config:ro
+      - ./state:/app/state
+      - ./proof:/app/proof
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "paper-run"]
+
+  # Independent last line of defence: no Kafka, no agent/gate/executor. Cancels resting BUY orders (never exits) if the
+  # trading path goes silent during the session or Postgres is unreachable; alerts a human. Needs only Postgres + Alpaca.
+  watchdog:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env, *baseline-env]
+      WATCHDOG_PING_URL:
+      ALERT_WEBHOOK_URL:
+    command: ["tradectl", "run", "watchdog"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "watchdog"]
+
+  agent-live:
+    <<: *app
+    environment: *agent-env
+    command: ["tradectl", "run", "agent", "--variant", "live"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "agent-live"]
+
+  risk-gate-live:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+      ALERT_WEBHOOK_URL:
+    command: ["tradectl", "run", "risk-gate", "--lane", "live"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "risk-gate-live"]
+
+  executor-live:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      ALERT_WEBHOOK_URL:
+    command: ["tradectl", "run", "executor", "--lane", "live"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "executor-live"]
+
+  order-events-live:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+    command: ["tradectl", "run", "order-events", "--lane", "live"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "order-events-live"]
+
+  journal:
+    <<: *app
+    command: ["tradectl", "run", "journal"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "journal"]
+
+  # ------------------------------------------------------------------ E1: plain rule on paper account #2
+  agent-rule-baseline:
+    <<: *app
+    environment:
+      <<: [*app-env, *baseline-env]
+    profiles: [baseline]
+    command: ["tradectl", "run", "agent", "--variant", "rule-baseline"]
+  risk-gate-baseline:
+    <<: *app
+    environment:
+      <<: [*app-env, *baseline-env]
+    profiles: [baseline]
+    command: ["tradectl", "run", "risk-gate", "--lane", "baseline"]
+  executor-baseline:
+    <<: *app
+    environment:
+      <<: [*app-env, *baseline-env]
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+    profiles: [baseline]
+    command: ["tradectl", "run", "executor", "--lane", "baseline"]
+  order-events-baseline:
+    <<: *app
+    environment:
+      <<: [*app-env, *baseline-env]
+    profiles: [baseline]
+    command: ["tradectl", "run", "order-events", "--lane", "baseline"]
+
+  # ------------------------------------------------------------------ E2: second model in shadow
+  agent-shadow-b:
+    <<: *app
+    environment: *agent-env
+    profiles: [shadow]
+    command: ["tradectl", "run", "agent", "--variant", "shadow-b"]
+  shadow-ledger:
+    <<: *app
+    profiles: [shadow]
+    command: ["tradectl", "run", "shadow-ledger"]
+
+  # ------------------------------------------------------------------ optional UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    profiles: [ui]
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: trader
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+volumes:
+  kafka-data:
+  pg-data:

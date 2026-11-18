@@ -1,0 +1,330 @@
+{
+  "adv_usd_20d": {
+    "definition_hash": "04f5e91fcc6b240e4e189f5a0c993065574a878407ceac5e0e0e1b1bba23c9a6",
+    "version": 1
+  },
+  "aggregate_cap_usd": {
+    "definition_hash": "5b3d1daf4f41e5176c790d3e573128f793f114365d1002fd52f6c3a3cf709e15",
+    "version": 1
+  },
+  "aggregate_headroom_usd": {
+    "definition_hash": "7f894fffe6d9bab8e0ad583c67612ef995057be6eb82c1674ac427917fc480dd",
+    "version": 1
+  },
+  "ask_px": {
+    "definition_hash": "d21cdd09837d47949c76b758548fce36c4b0cd09c4a5a55ebbaa1310677b67f2",
+    "version": 1
+  },
+  "atr14_15m": {
+    "definition_hash": "0cd14e7355a071eae493c0350be0f719f64b66c10f79d841097534e411f8ef55",
+    "version": 1
+  },
+  "atr14_1d": {
+    "definition_hash": "65e38f4cc800ac2d9f46725eed1bf392a3f2c2c06921f1a0c9e892ee4d5d0dfa",
+    "version": 1
+  },
+  "atr14_pct": {
+    "definition_hash": "87450ee9970a10f0e15bbc5ca5565839accb2032b3106a021f9f9b17fec041f4",
+    "version": 1
+  },
+  "bid_px": {
+    "definition_hash": "149628cd6afbe67346be6d55873f7b77cb66740218bcc48321d817a06b3ee89c",
+    "version": 1
+  },
+  "breadth_above_ema21": {
+    "definition_hash": "1dfe664d1d55ba2c6b8d73cf2bd7da0b45ae21d9b93fdca54bbad85b1fac8478",
+    "version": 1
+  },
+  "buying_power": {
+    "definition_hash": "74948decdd55fd097ac15c392598e5c89fee23f83c5ec4ba8566e61909b40ce8",
+    "version": 1
+  },
+  "cash": {
+    "definition_hash": "b067f5e3b2c9292fcee3c9aabe5541607d28f87426630b38e2bf8951f1194fe6",
+    "version": 1
+  },
+  "day_pnl_pct": {
+    "definition_hash": "35e8185257049f4c00ef26d12c1abe304e093ea6bc4fc12b537040cfa04c0a9b",
+    "version": 1
+  },
+  "dist_hi_atr": {
+    "definition_hash": "913ffc4ad0021183fb4499a62d6902e2edd10a0fbb70f607090482ece776e358",
+    "version": 1
+  },
+  "dist_lo_atr": {
+    "definition_hash": "79ba4c70fe68a60365760ccb02ccb107c320378d10e4603412f63036401bdaf4",
+    "version": 1
+  },
+  "drawdown_pct": {
+    "definition_hash": "19aac9ba996852d822d6588e12d64fa043786e0598ba318014248d51bd906061",
+    "version": 1
+  },
+  "ema21_15m": {
+    "definition_hash": "bfcac61e9dee84190cd1827d50078c5448989ad35be0ee995056aaf02ee7607c",
+    "version": 1
+  },
+  "ema9_15m": {
+    "definition_hash": "81255de850ab79a955d7165f37133a035d4802881b1219f5429b500bacddcef1",
+    "version": 1
+  },
+  "ema_gap_bps_15m": {
+    "definition_hash": "d4519f3cdc61641980f51aa97a7b12ce587903b43d4473347e8072eefb306b06",
+    "version": 1
+  },
+  "equity": {
+    "definition_hash": "a21926162f57aa86dd661bbce9dcc7aa29bb301e21bc9ec1cebb2177f360ad9d",
+    "version": 1
+  },
+  "gap_open_pct": {
+    "definition_hash": "27438d4db35f4a52d2676b6cfb8852ee7be29be945cadf37fb3f58ba69295c48",
+    "version": 1
+  },
+  "gross_exposure_pct": {
+    "definition_hash": "b82cc518ed9b1de8f8e74c511dab2d1c7583048e14a19374a76c5474f1008430",
+    "version": 1
+  },
+  "gross_exposure_usd": {
+    "definition_hash": "e4c8752bb8f54d3d00e2270f83f01181779ab83b33dea6be54e1e35884214e3f",
+    "version": 1
+  },
+  "halted": {
+    "definition_hash": "22c5cf87d4bc3aaacea95c76c1094c81c594ed081bfc45136723da8524fe30fe",
+    "version": 1
+  },
+  "held_minutes": {
+    "definition_hash": "de6ed6d34d1513b5e61af242152ecf02f3f20d0bccf58b25f9ab95a995178994",
+    "version": 1
+  },
+  "intraday_ret_1h": {
+    "definition_hash": "c3bb7751ab2998e254086ae581fb7f20ad580c68d6650e7e720f36e532524679",
+    "version": 1
+  },
+  "intraday_setup_1m": {
+    "definition_hash": "2a1f51e0688d43ea3cd70ba8b525471b580ddcbe0f637c81970c75c7138cbab9",
+    "version": 1
+  },
+  "last_close": {
+    "definition_hash": "f2485fc27c074d48c270acbb1bf9e7b93f036a37cd4a5aa57c094a8acd6c896b",
+    "version": 1
+  },
+  "last_reconcile_age_s": {
+    "definition_hash": "5ed0382f554811e2d39e6854c08500c8895c9dbcda0235c56d072d62a2469f31",
+    "version": 1
+  },
+  "luld_active": {
+    "definition_hash": "84a715b28e8dfa8d72a743849f2a09b7da74401c8fba9332542400d273fa2d40",
+    "version": 1
+  },
+  "macd_hist_15m": {
+    "definition_hash": "391617c8f394a1c56557a354ffbb739deeb6598893cef6f93561fd1e03023f89",
+    "version": 1
+  },
+  "mid_px": {
+    "definition_hash": "d567a34967f88414d7a3df1d666a251c6797e5958b4cef43f5ef6a60ca3d67aa",
+    "version": 1
+  },
+  "minutes_to_close": {
+    "definition_hash": "e79b1ead803ca1af780c0e69b139be1b1ba24102169c8f83d82d950747a5d985",
+    "version": 1
+  },
+  "news_age_min_latest": {
+    "definition_hash": "d0f79dc86a02147ac6e3e73fa897c71f80d08fdd8e16cef524a7d6c002f88944",
+    "version": 1
+  },
+  "news_confirmed": {
+    "definition_hash": "6922ebc40dbfca1467558cd0887aabbc71dff99814a7ee2eb493bf0bdde0ce87",
+    "version": 1
+  },
+  "news_count_1h": {
+    "definition_hash": "0c9362fe1879256201ef4e86ff61c87bc2a76fdcfd09121660bbe0374415b54d",
+    "version": 1
+  },
+  "news_count_4h": {
+    "definition_hash": "335efa9b2b30031f86a81b17a1b855a6218afc7b325c38eb2e9628d05e1ef652",
+    "version": 1
+  },
+  "news_event_flags_4h": {
+    "definition_hash": "0b5a8a44edde068c04598f922cfa3866f8ff6ff89d2e3abe36cd7bcadd585d6a",
+    "version": 1
+  },
+  "news_max_materiality_4h": {
+    "definition_hash": "9c45e9b4537de35b51c26ca1db4972ed66fdbc999ca5cc06330fce024793a536",
+    "version": 1
+  },
+  "news_novelty_max_4h": {
+    "definition_hash": "15ceb7bfe126689993132ebff56f2061c01d0118a649c498dfdb2a4611b3872c",
+    "version": 1
+  },
+  "news_sent_ewm_240m": {
+    "definition_hash": "9cad993fb755be6b06237ed92bf169eddf929c1d372be35d7b3a73e0a081da64",
+    "version": 1
+  },
+  "news_sent_ewm_60m": {
+    "definition_hash": "74ab70c1d720c8c606cc3011a5514f45126c5e8c8426208714794d5187d17cfe",
+    "version": 1
+  },
+  "news_source_div_4h": {
+    "definition_hash": "6fd469c4e1949b28ab89b7e30dcbdfba53b0b605ddd9af2a02f1dc90d25d5dea",
+    "version": 1
+  },
+  "open_buy_notional_usd": {
+    "definition_hash": "0bd0ead1dfdb6acff9a65a2218d857576e118af602122eece189667206bede05",
+    "version": 1
+  },
+  "open_orders": {
+    "definition_hash": "1cf37cbf858021596372e952c89a701daef0ee36f8311986fa0fafed63d75d56",
+    "version": 1
+  },
+  "open_orders_count": {
+    "definition_hash": "1db4227acebde844b754076681214bda0bcfd3c72bec4be5c6ea46057bd7d050",
+    "version": 1
+  },
+  "pending_reserved_usd": {
+    "definition_hash": "1c3e96048ae101f341b6eac39eb86b069bf419827f339674419ef4461123d652",
+    "version": 1
+  },
+  "position_qty": {
+    "definition_hash": "3a51212061aa2443afb650fed66b1af1e447bb730171af4a36585e527b1d80c1",
+    "version": 1
+  },
+  "position_value_usd": {
+    "definition_hash": "9100bec4208555d35d033d9048635a71b0f60f03e85d3686bf74fa96183c91f0",
+    "version": 1
+  },
+  "positions": {
+    "definition_hash": "c3284657040e6035a4d06ef764fa1b33655b002cd37242778e1213ebaed39342",
+    "version": 1
+  },
+  "price_vs_sma20": {
+    "definition_hash": "a986b9ccdc15f02802f5a80803b80935d09493eb826ae8df7fa7346f103ad0de",
+    "version": 1
+  },
+  "recent_price_10m": {
+    "definition_hash": "b12384d784f86a84237926628d12de66a105fd43c6d4373b04837d58cb315866",
+    "version": 1
+  },
+  "recent_range_bps_10m": {
+    "definition_hash": "b7dd2e6e259522e11ce386fc6971e4345d7d620eab469b0b640dd43dc367de08",
+    "version": 1
+  },
+  "recent_range_bps_5m": {
+    "definition_hash": "860a2856b2ccbb26455a091fb0f3b395ba74d4f11815107cd2bf89519339cad0",
+    "version": 1
+  },
+  "recent_return_10m": {
+    "definition_hash": "03c0484086a1800e58e8dbba082effd53eeaea3cf76d08ced3ce34ad17043a8d",
+    "version": 1
+  },
+  "recent_return_5m": {
+    "definition_hash": "a9090b46559bdc07d434895d3d957ce2a356cbbc16c9cb9baaa77707b3f05a9d",
+    "version": 1
+  },
+  "recent_volume_10m": {
+    "definition_hash": "891ed5cd77fa2677900fa0b1b698d5c0e309adca70f0778900324e2ee7085329",
+    "version": 1
+  },
+  "recent_volume_5m": {
+    "definition_hash": "c7331f022ddf0c3e83c61484b18149f5bbda38eb21783136c4a914f0d639219e",
+    "version": 1
+  },
+  "regime_label": {
+    "definition_hash": "f8b361d7d0c5a427e694e0030a843bd36754b001def12bc418ef1adef28b342e",
+    "version": 1
+  },
+  "relstr_spy_60m": {
+    "definition_hash": "c04b464cc7c386f1842f1840222d504dfbc0222be9a0516a37e6e0904473c726",
+    "version": 1
+  },
+  "ret_15m": {
+    "definition_hash": "3fa23ddd5538006070a39ed7e21d1f81b88e8c1b2da251090001e1d5b31729b4",
+    "version": 1
+  },
+  "ret_1d": {
+    "definition_hash": "b77eca691fb687b32c155760906a8a38e5299b4c44eee29fbf6e377b73cbaea9",
+    "version": 1
+  },
+  "ret_20d": {
+    "definition_hash": "7d1f194234bcbb18990a52275f5ebaca563a1a25090d671d766ca2174f5981de",
+    "version": 1
+  },
+  "ret_5d": {
+    "definition_hash": "5d56db82ca3b8159afcddb318aa508503c66487f94303dd01be3d5e68a303274",
+    "version": 1
+  },
+  "ret_5m": {
+    "definition_hash": "c10a3b576605fcb373b88e35d059bf6627af23581a2b8662da776eea452d5585",
+    "version": 1
+  },
+  "ret_60m": {
+    "definition_hash": "6c49ff8f07e8a86cc02f4d0809adecc79f3c16df7beb7c08ca7d07a4fd5ec138",
+    "version": 1
+  },
+  "rsi14": {
+    "definition_hash": "273a3a79fda5aa1b04ba7b65e320b0d677e91e35182d5b12cc3bff007a272220",
+    "version": 1
+  },
+  "rsi14_15m": {
+    "definition_hash": "f0b8fdaff0df06efccdc484282db066e4bc1fa99675103fb30be03642b6b7f62",
+    "version": 1
+  },
+  "rvol_60m": {
+    "definition_hash": "84c5ec7ef3cd8890f517e843a6516dfca0124cd918e8231db47dd5f3380632b8",
+    "version": 1
+  },
+  "sellable_qty": {
+    "definition_hash": "9cbf72e4fb1ec81062881fc847dc2d1e35ab43121720d1e02edc4f0c384d1dd8",
+    "version": 1
+  },
+  "session_phase": {
+    "definition_hash": "91f88fe80839bb0ac3249a4902db0a61b7a6dea77b7e6501c6987ed237f10701",
+    "version": 1
+  },
+  "sma20": {
+    "definition_hash": "80f8a078e50918455417a674cd7ded739706b2a430efacedd72919ed232d54a4",
+    "version": 1
+  },
+  "sma50": {
+    "definition_hash": "3890c9d7d22f4c3a7ab35f1845830a46538258cb03bdab0575088fe60a4a3670",
+    "version": 1
+  },
+  "spread_bps": {
+    "definition_hash": "e2b080ab64bd63983e296f931d508ce9db83322ca88eb34c249340183c74a2b3",
+    "version": 1
+  },
+  "spy_ema_gap_bps_15m": {
+    "definition_hash": "fda7da7a15db7fc418231026a3e223884f14a40f46825f562816ed7717e30bbe",
+    "version": 1
+  },
+  "spy_ret_60m": {
+    "definition_hash": "9feddbd112fbbf19cb8b0a01907ec5fc62f02e625c79e02a0086550047c1ffe5",
+    "version": 1
+  },
+  "spy_vol_regime_ratio": {
+    "definition_hash": "3b7257aaef5ee3d776aed337521b63c192b93564bffe42a1abf700422889b145",
+    "version": 1
+  },
+  "trend_sma20_vs_sma50": {
+    "definition_hash": "845834259bc5691d9cfa82aa77ff12640852a2a2b32e08e7210b2bb4553cc7fe",
+    "version": 1
+  },
+  "unrealized_pnl_pct": {
+    "definition_hash": "7c530604a104605b121f051830ef4e86d2297d13644cb4cd3aa7715106762966",
+    "version": 1
+  },
+  "vol_regime_ratio": {
+    "definition_hash": "302e72c1c9b979b747bf2618388e62af153556d39d4b50576ed745ea68a8b5eb",
+    "version": 1
+  },
+  "volume_z20": {
+    "definition_hash": "970d159be9565f590088ff19a45f6dee822342fc70d0f2077526c447e4c982ab",
+    "version": 1
+  },
+  "volz_tod_15m": {
+    "definition_hash": "4315d547af169457613be20724c9e205f62315efae229f2f3093d60b695b85f8",
+    "version": 1
+  },
+  "vwap_dev_session": {
+    "definition_hash": "b41de1ffc81132fedc8048d5bce3f371639453ca98c1ff04a19bd6fae96f272e",
+    "version": 1
+  }
+}

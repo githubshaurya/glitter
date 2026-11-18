@@ -1,15 +1,38 @@
+# secrets: never commit
 .env
 .env.*
 !.env.example
-.venv/
+config/llm_profiles.yaml
+
+# python
 __pycache__/
-*.py[cod]
+*.pyc
+.venv/
 .pytest_cache/
+.mypy_cache/
 .ruff_cache/
 *.egg-info/
-data/
-reports/
 dist/
-test-results/
-node_modules/
-playwright-report/
+
+# local state / generated
+*.log
+.claude/
+
+# the employer's brief is not part of the deliverable repo
+glitter-software-engineering-take-home.pdf
+
+# runtime state (kill-switch halt file)
+state/
+
+# Machine downloads and private live-run artifacts are packaged separately.
+tools/runtime/
+proof/
+runs/
+journal/
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite*
+*.dump

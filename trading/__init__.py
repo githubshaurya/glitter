@@ -1,1 +1,0 @@
-"""Glitter: paper trading only."""

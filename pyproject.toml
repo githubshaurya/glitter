@@ -1,45 +1,69 @@
 [project]
-name = "glitter-paper"
+name = "trader"
 version = "0.1.0"
-description = "Auditable agent-vetted Alpaca paper trading"
-requires-python = ">=3.12"
+description = "Event-driven agentic trading system on Alpaca paper trading (Kafka + provider-agnostic LLM agent + hard risk gate)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-  "fastapi>=0.115,<1",
-  "uvicorn>=0.34,<1",
-  "httpx[socks]>=0.28,<1",
-  "sqlalchemy>=2.0.38,<3",
-  "psycopg[binary]>=3.2,<4",
-  "pydantic-settings>=2.8,<3",
+    "alpaca-py>=0.45,<0.46",
+    "confluent-kafka>=2.16,<3",
+    "anthropic>=0.60",
+    "openai>=1.60",
+    "httpx>=0.27",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "structlog>=24",
+    "tenacity>=9",
+    "typer>=0.12",
+    "rich>=13",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "matplotlib>=3.9",
+    "uuid-utils>=0.9",
+    "tzdata>=2026.6",
+    "tiktoken>=0.14.0",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3,<10", "ruff>=0.11,<1"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-pyyaml",
+    "pandas-stubs",
+]
 
 [project.scripts]
-glitter-cycle = "trading.main:cycle"
-glitter-serve = "trading.main:serve"
-glitter-check = "trading.main:check"
-glitter-report = "trading.reporting:main"
-glitter-experiment = "trading.experiments:main"
-glitter-halt = "trading.main:halt"
-glitter-commission = "trading.commissioning:main"
-glitter-public-replay = "trading.public_replay:main"
+tradectl = "trader.cli:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["trading"]
+packages = ["src/trader"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+markers = ["integration: needs a running Kafka broker (docker compose up kafka)"]
+addopts = "-m 'not integration'"
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py312"
+src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# E501: dense table/log lines are intentional and no formatter is enforced; the real findings stay on.
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]

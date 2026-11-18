@@ -1,0 +1,86 @@
+# Trading configuration. HARD RISK LIMITS LIVE HERE (validated by trader.config, enforced in code by
+# trader.risk before every order). They are not prompt text and the model cannot change them.
+
+# Allowlist: the ONLY symbols the system will ever trade. Liquid ETFs + a few mega caps (IEX data on free plan).
+symbols: [SPY, QQQ]
+benchmark: SPY
+
+cycle_minutes: 15            # scored council uses exchange-local settled quarter-hour slots
+cycle_ttl_seconds: 300       # a cycle older than this is journaled as stale, never decided on
+proposal_ttl_seconds: 180    # a proposal older than this is never traded
+data_feed: iex               # free plan; SIP needs a paid plan
+bars_lookback_days: 90
+
+# New default path. Legacy code remains available for controlled comparison only.
+features:
+  enabled: true
+  legacy_inline_indicators: false
+  poll_seconds: 60
+  catchup_seconds: 8
+  min_ok_fraction: 0.9
+  history_days: 100
+  symbol_batch_size: 20
+council:
+  enabled: true
+  arbiter: scored
+  deadline_seconds: 180
+  member_seconds: 75
+  chair_seconds: 60
+  skeptic_seconds: 45
+  max_tokens: 768                 # below the observed hosted output-token bucket ceiling
+council_v2:
+  # TECHNICAL/NEWS refine code assessments; CHAIR/SKEPTIC review qualifying actions.
+  # Optional role_profiles selects named profiles from your ignored llm_profiles.yaml.
+  # Unlisted symbols remain DIAGNOSTIC until explicitly promoted after paper evidence.
+  raw_news_to_specialist: true
+  allow_code_only_entries: false
+  decision_clock_enabled: true
+  cadence_minutes: 15
+  settle_seconds: 20
+  run_deadline_s: 150
+durable_risk:
+  enabled: true
+  transaction_timeout_seconds: 30
+  execution_lease_seconds: 30
+  reconcile_after_seconds: 60
+  max_reconcile_age_seconds: 60
+
+risk:
+  max_order_notional: 2000          # $ per single order
+  max_position_notional: 10000      # $ in one symbol after the fill
+  max_position_pct_equity: 10       # % of equity in one symbol after the fill
+  max_gross_exposure_pct: 50        # total long exposure as % of equity
+  max_daily_loss_pct: 2.0           # equity vs prior close; breach auto-halts everything (kill switch)
+  max_orders_per_day: 20
+  symbol_cooldown_minutes: 30       # no re-trading the same symbol within this window
+  no_trade_first_minutes: 5         # skip the opening auction noise
+  no_trade_last_minutes: 10         # no new orders near the close
+  max_quote_age_seconds: 15
+  max_limit_deviation_bps: 40       # limit price vs fresh quote mid
+  max_spread_bps: 40                # entries only: refuse a wide/one-sided quote (IEX top-of-book can be thin or stale)
+  max_clock_skew_seconds: 10        # entries only: refuse if this host's clock is off the broker's. 10 s because 1-7 s residual skew is reported on current
+                                    # Docker Desktop (see docs/DESIGN_REVIEW.md); minutes-scale drift after sleep is what this must catch
+  max_consecutive_order_errors: 5   # auto-halt after N broker rejections in a row
+  allow_shorting: false
+
+sizing:
+  min_conviction: 0.55
+  target_notional_at_full_conviction: 2000
+  limit_offset_bps: 5
+
+agent:
+  max_steps: 8
+  decision_timeout_seconds: 120
+  max_tokens: 6144                  # reasoning models spend hidden tokens before the decision JSON; 2048 truncated it
+  daily_llm_budget_usd: 5.0         # per variant per day; exceeded => HOLD (journaled)
+  max_consecutive_failures: 3       # circuit breaker
+  failure_cooldown_seconds: 600
+  tool_result_char_limit: 6000
+  max_actions_per_cycle: 3
+
+watchdog:                           # independent process; cancels resting BUY orders (never exits) if the trading path goes silent in session
+  heartbeat_timeout_seconds: 180
+  check_interval_seconds: 30
+  db_grace_checks: 4
+  reaction_cooldown_seconds: 300
+  cancel_resting_buys: true
