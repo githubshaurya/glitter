@@ -1,5 +1,28 @@
 # Glitter Trading Lab
 
+## Problem statement and design approach
+
+### Situation
+
+An intraday system has a limited window to make a decision. Market data can arrive late or drop out, model calls can stall, and a broker can accept an order even if its acknowledgement never reaches the client. Each of those failures changes what the system can safely do with the next candle.
+
+### Task
+
+Build an auditable trading system for a single portfolio. Use timestamped market data and account state to recommend buy, sell, or hold, size orders within explicit risk limits, and support both historical replay and Alpaca paper execution. A reviewer should be able to trace each decision from the evidence available at the time through the risk verdict and any resulting fill.
+
+### Action
+
+- **Recover data without delaying every decision.** Stream live market data over WebSocket and backfill gaps through Alpaca REST. Persist recovery checkpoints and deduplicate overlapping data. Compute features in Python from completed candles, record data freshness and gaps, and pin the evidence for each council run.
+- **Give models bounded decisions.** Specialists review the stored market and account evidence. The News specialist can also read selected articles. The council validates outputs before arbitration, and code owns sizing and risk approval. The realtime paper path shares one deadline across evidence assembly, inference, risk approval, and order submission.
+- **Make retries safe.** PostgreSQL stores decisions, exposure reservations, and pending notifications. Kafka carries events between services. Approved paper orders use a stable client order ID, so a lost acknowledgement leads to broker reconciliation while the reservation stays in place. New approvals for the same account are serialized to prevent competing orders from claiming the same capacity.
+- **Compare results under the same constraints.** Run the council and a rules-only comparison on the same historical window with the same risk limits and fill model. Shift simulated order submission by the measured decision time and record decisions, risk checks, orders, and fills. The Docker UI lets a reviewer inspect the evidence and recorded role responses.
+
+### Result
+
+The October 26–28 NVDA replay evaluated **75 decision slots**. The council completed **49**, recorded provider failures in **26 slots**, and produced **10 simulated fills**. The results below include returns, drawdown, orders, and latency, including incomplete runs. This evaluation covers historical replay and local integration. Paper execution under live market-open load remains unverified.
+
+## Run locally
+
 Install Docker Desktop or Docker Engine with Compose. From the cloned repository, copy
 `.env.example` to `.env` and set `ALPACA_PAPER_KEY_ID`, `ALPACA_PAPER_SECRET_KEY`, and `GROQ_API_KEY`.
 
