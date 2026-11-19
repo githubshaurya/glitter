@@ -32,7 +32,9 @@ docker compose -f compose.app.yml up --build
 
 Open [localhost:8765](http://localhost:8765/). Compose starts the UI, PostgreSQL, and Kafka.
 In **Simulation**, choose a NASDAQ ticker, a past trading window with Alpaca SIP data, and a starting
-budget. Open a decision to review its evidence, council responses, and risk checks. Simulated order
+budget. Open a decision to review its evidence, council responses, and risk checks. Expand **STAR audit** to
+inspect its date, instrument, portfolio, and strategy, then filter the recorded role logs and review linked fills.
+The Docker app stores these audit facts in PostgreSQL. Simulated order
 and fill history clears when the app stops.
 
 ## NVDA historical replay, October 26–28, 2026

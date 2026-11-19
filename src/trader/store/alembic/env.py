@@ -1,10 +1,11 @@
 from alembic import context
 from sqlalchemy import create_engine
 
+from trader.reporting.star import STAR
 from trader.store.models import Base
 
 config = context.config
-target_metadata = Base.metadata
+target_metadata = [Base.metadata, STAR]
 
 
 def run_migrations_online() -> None:

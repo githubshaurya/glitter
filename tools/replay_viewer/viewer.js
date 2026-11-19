@@ -8,7 +8,7 @@ const cellNumber = new Intl.NumberFormat("en-US", {maximumFractionDigits: 4});
 const outcomeNames = {
   DECIDED_TRADE: "Trade intent", DECIDED_HOLD: "Hold", DECIDED_NO_TRADE: "No trade", INCOMPLETE_PROVIDER: "Provider failure",
   INCOMPLETE_CONTRACT: "Invalid response", INCOMPLETE_DATA: "Incomplete data", BLOCKED_GUARD: "Guard blocked",
-  NO_CANDIDATE: "No candidate", DEADLINE: "Deadline elapsed",
+  NO_CANDIDATE: "No candidate", DEADLINE: "Deadline elapsed", SESSION_CUTOFF: "Session cutoff",
 };
 const roles = ["TECHNICAL", "NEWS", "REGIME", "LIQUIDITY", "PORTFOLIO", "CHAIR", "SKEPTIC"];
 const state = {
@@ -53,6 +53,54 @@ function fold(label, content) {
 
 function showJson(value) {
   return node("pre", JSON.stringify(value, null, 2));
+}
+
+function starAudit(detail) {
+  return fold("STAR audit", () => {
+    const {decision, role_logs, fills} = detail.star;
+    const reports = {...detail.result.reports, CHAIR: detail.result.draft, SKEPTIC: detail.result.skeptic};
+    const content = node("div");
+    const dimensions = node("dl", null, "metrics");
+    for (const [label, key] of [["Trading date (ET)", "date"], ["Instrument", "instrument"],
+      ["Portfolio", "portfolio"], ["Strategy", "strategy"]]) {
+      dimensions.append(pair(label, display(decision[key])));
+    }
+    content.append(dimensions, node("h3", "Decision fact"));
+    content.append(table(["Decision", "Action", "Outcome", "Latency (ms)"], [
+      [decision.id, decision.action.toUpperCase(), outcomeNames[decision.outcome] || decision.outcome, decision.latency_ms],
+    ]));
+    const filter = node("select", null, "audit-role-filter");
+    filter.setAttribute("aria-label", "Filter role logs");
+    for (const role of ["All roles", ...new Set(role_logs.map(log => log.role))]) {
+      const option = node("option", role);
+      option.value = role === "All roles" ? "" : role;
+      filter.append(option);
+    }
+    const logTable = node("div");
+    const renderLogs = () => {
+      const matching = role_logs.filter(log => !filter.value || log.role === filter.value);
+      logTable.replaceChildren(table(["Role", "Record", "Status", "Model", "Latency (ms)"], matching.map(log => [
+        log.role, log.sequence ? `Attempt ${log.attempt ?? log.sequence}` : "Verdict", log.status, log.model ?? "—",
+        log.latency_ms ?? "—",
+      ])));
+      for (const log of matching) {
+        if (!log.sequence && reports[log.role]) {
+          logTable.append(fold(`${log.role} recorded verdict`, () => showJson(reports[log.role])));
+        } else if (log.sequence) {
+          const call = detail.attempts.filter(attempt => attempt.role === log.role)[log.sequence - 1];
+          if (call) logTable.append(attemptDetails(call));
+        }
+      }
+    };
+    filter.addEventListener("change", renderLogs);
+    renderLogs();
+    content.append(node("h3", "Role log facts"), filter, logTable, node("h3", "Fill facts"));
+    content.append(fills.length ? table(["Order", "Side", "Shares", "Fill price", "Time (ET)"], fills.map(fill => [
+      fill.order_id, fill.side?.toUpperCase() ?? "—", fill.shares ?? "—", `$${fill.price}`,
+      fill.at ? secondTime.format(new Date(fill.at)) : "—",
+    ])) : node("p", "No fills recorded.", "quiet"));
+    return content;
+  });
 }
 
 function display(value) {
@@ -396,6 +444,7 @@ function renderCouncil() {
     for (const attempt of attempts) audit.append(attemptDetails(attempt));
     return audit;
   }));
+  if (state.detail.star) logs.append(starAudit(state.detail));
 }
 
 function attemptDetails(attempt) {
@@ -680,7 +729,9 @@ async function openSimulationDecision(id, decision, button) {
     const heading = node("h3", `Council audit · ${secondTime.format(new Date(detail.as_of))} ET`);
     const note = [outcomeNames[result.outcome] || result.outcome, ...(result.reason_codes || [])].join(" · ");
     audit.replaceChildren(heading, node("p", note, "quiet"));
-    for (const role of ["CHAIR", ...roles.filter(name => name !== "CHAIR")]) {
+    if (detail.star) audit.append(starAudit(detail));
+    const reviewRoles = result.outcome === "SESSION_CUTOFF" ? [] : ["CHAIR", ...roles.filter(name => name !== "CHAIR")];
+    for (const role of reviewRoles) {
       const report = role === "CHAIR" ? result.draft : role === "SKEPTIC" ? result.skeptic : result.reports?.[role];
       const calls = attempts.filter(call => call.role === role);
       const content = node("div");
@@ -693,7 +744,7 @@ async function openSimulationDecision(id, decision, button) {
       section.open = role === "CHAIR";
       audit.append(section);
     }
-    audit.append(fold("Candles and computed features", () => showJson(detail.evidence)));
+    if (detail.evidence) audit.append(fold("Candles and computed features", () => showJson(detail.evidence)));
     audit.append(fold("Guardrail results", () => detail.risk.length ? showJson(detail.risk) : node("p", "No order reached the risk gate.", "quiet")));
     if (button.isConnected) {
       heading.tabIndex = -1;
@@ -735,6 +786,12 @@ function renderSimulation(run) {
     ])));
   } else {
     ledger.append(node("p", "No simulated orders recorded.", "quiet"));
+  }
+  if (orders.some(order => order.reason === "session_cutoff")) {
+    const cutoff = node("button", "View cutoff audit", "text-button");
+    cutoff.type = "button";
+    cutoff.addEventListener("click", () => openSimulationDecision(run.id, {index: "cutoff"}, cutoff));
+    ledger.append(cutoff);
   }
   output.append(ledger);
   if (!decisions.length) return;

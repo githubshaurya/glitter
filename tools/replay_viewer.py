@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from datetime import datetime
@@ -13,34 +14,16 @@ from threading import Lock, Thread
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from trader.reporting.star import StarJournal, public_attempts
+
 ASSETS = Path(__file__).with_name("replay_viewer")
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/viewer.css": ("viewer.css", "text/css; charset=utf-8"),
     "/viewer.js": ("viewer.js", "text/javascript; charset=utf-8"),
 }
-
-
-def public_attempts(entry):
-    attempts = []
-    for attempt in entry.get("attempts", []):
-        request = attempt.get("request") or {}
-        response = attempt.get("response") or {}
-        attempts.append(
-            {
-                **{
-                    key: attempt.get(key)
-                    for key in ("role", "attempt", "status", "error", "started_at", "completed_at")
-                },
-                "request": {
-                    key: request[key]
-                    for key in ("user", "system", "response_schema", "structured_output")
-                    if key in request
-                },
-                "response": {key: response[key] for key in ("text", "model", "latency_ms", "usage") if key in response},
-            }
-        )
-    return attempts
 
 
 HISTORY_FIELDS = (
@@ -145,6 +128,28 @@ def make_server(
             progress = {"status": "queued", "decisions": [], "orders": []}
         return {**progress, "request": request, "id": run_id}
 
+    def simulation_audit(run_id, request, folder, index):
+        progress = simulation_status(run_id, request, folder)
+        if index == "cutoff":
+            orders = [order for order in progress["orders"] if order.get("reason") == "session_cutoff"]
+            if not orders:
+                raise ValueError("Cutoff execution is unavailable.")
+            detail = {"as_of": orders[0]["submitted_at"], "result": {"outcome": "SESSION_CUTOFF"}, "risk": [],
+                      "recommendation": {"action": orders[0]["side"]}}
+        else:
+            index = int(index)
+            if not any(row["index"] == index for row in progress["decisions"]):
+                raise ValueError("The decision has not been recorded.")
+            detail = json.loads((folder / f"decision-{index}.json").read_text(encoding="utf-8"))
+            orders = [order for order in progress["orders"] if order.get("decision_index") == index]
+        detail["orders"] = orders
+        detail["fills"] = [
+            dict(order_id=order["id"], side=order["side"], qty=order["filled_qty"],
+                 price=order["fill_price"], t=order["filled_at"])
+            for order in orders if order.get("status") == "filled"
+        ]
+        return detail
+
     def simulate(run_id, request, folder):
         try:
             with (folder / "worker.log").open("w", encoding="utf-8") as log:
@@ -179,6 +184,9 @@ def make_server(
         }
     ).encode()
 
+    star_url = os.environ.get("TRADER_VIEWER_DATABASE_URL")
+    star = StarJournal(star_url)
+
     class Handler(BaseHTTPRequestHandler):
         def check_host(self):
             allowed = {f"{host}:{self.server.server_port}" for host in ("localhost", "127.0.0.1")}
@@ -199,6 +207,25 @@ def make_server(
 
         def send_json(self, body, status=200):
             self.send_data(json.dumps(body, allow_nan=False).encode(), status=status)
+
+        def send_audit(self, decision_id, load_detail, *, symbol, portfolio, strategy, company=None, saved_source=None):
+            try:
+                detail = star.get(decision_id)
+                if detail is None:
+                    detail = star.project(decision_id, load_detail(), symbol=symbol, portfolio=portfolio,
+                                          strategy=strategy, company=company)
+            except (OSError, ValueError, KeyError):
+                self.send_json({"error": "The recorded decision could not be read."}, 404)
+                return
+            except SQLAlchemyError:
+                self.send_json({"error": "The audit database is unavailable. Try again when it recovers."}, 503)
+                return
+            if saved_source:
+                detail = {
+                    **{key: detail[key] for key in (*HISTORY_FIELDS, "attempts", "star") if key in detail},
+                    "source": saved_source,
+                }
+            self.send_json(detail)
 
         def do_GET(self):
             if not self.check_host():
@@ -237,16 +264,16 @@ def make_server(
                 if len(parts) == 1:
                     self.send_json(simulation_status(run_id, *saved))
                     return
-                try:
-                    index = int(parts[2])
-                    if parts[1] != "decisions" or not 0 <= index < saved[0]["duration_minutes"]:
-                        raise ValueError
-                    detail = json.loads((saved[1] / f"decision-{index}.json").read_text(encoding="utf-8"))
-                except (OSError, ValueError):
+                index = parts[2]
+                if parts[1] != "decisions" or (index != "cutoff" and (
+                    not index.isascii() or not index.isdecimal() or len(index) > 2 or int(index) >= saved[0]["duration_minutes"]
+                )):
                     self.send_error(404)
                     return
-                detail["attempts"] = public_attempts(detail)
-                self.send_json(detail)
+                request, folder = saved
+                index = index if index == "cutoff" else str(int(index))
+                self.send_audit(f"simulation:{run_id}:{index}", lambda: simulation_audit(run_id, request, folder, index),
+                                symbol=request["symbol"], portfolio="simulation", strategy="intraday-council")
                 return
             elif path.startswith("/api/history/"):
                 with history_lock:
@@ -255,17 +282,9 @@ def make_server(
                     self.send_error(404)
                     return
                 _, summary, response_path = saved
-                try:
-                    detail = json.loads(response_path.read_text(encoding="utf-8"))
-                    self.send_json(
-                        {
-                            **{key: detail[key] for key in HISTORY_FIELDS if key in detail},
-                            "attempts": public_attempts(detail),
-                            "source": summary["source"],
-                        }
-                    )
-                except (OSError, ValueError):
-                    self.send_json({"error": "The saved decision could not be read."}, 404)
+                self.send_audit(summary["id"], lambda: json.loads(response_path.read_text(encoding="utf-8")),
+                                symbol=summary["symbol"], portfolio="analysis", strategy="interactive-council",
+                                company=summary["company"], saved_source=summary["source"])
                 return
             elif path == "/api/account" and analysis_root is not None:
                 try:
@@ -278,16 +297,18 @@ def make_server(
                 cycle = cycles[run_id]
                 entry = journal.get(run_id, {})
                 order_ids = [order["id"] for order in cycle["orders"]]
-                body = json.dumps(
-                    {
+                self.send_audit(
+                    f"replay:{run_id}", lambda: {
+                        "as_of": cycle["as_of"], "elapsed_s": cycle["elapsed_s"], "outcome": cycle["outcome"],
                         "evidence": entry.get("evidence", {}).get("content", {}),
                         "result": entry.get("result") or cycle.get("result", {}),
-                        "attempts": public_attempts(entry),
+                        "attempts": entry.get("attempts", []),
                         "risk": cycle["risk"],
                         "orders": [orders[order_id] for order_id in order_ids],
                         "fills": [fill for order_id in order_ids for fill in fills_by_order.get(order_id, [])],
-                    }
-                ).encode()
+                    }, symbol=manifest["symbol"], portfolio="simulation", strategy=entry.get("variant") or "saved-replay",
+                )
+                return
             else:
                 self.send_error(404)
                 return
@@ -358,8 +379,12 @@ def make_server(
                     self.send_json(response, 422)
                 else:
                     remember(response_path, response, "analysis")
-                    response["attempts"] = public_attempts(response)
-                    self.send_json(response)
+                    if "as_of" in response:
+                        self.send_audit(f"analysis-{folder.name}", lambda: response, symbol=scenario.symbol,
+                                        portfolio="analysis", strategy="interactive-council", company=response.get("company"))
+                    else:
+                        response["attempts"] = public_attempts(response)
+                        self.send_json(response)
             except subprocess.TimeoutExpired:
                 self.send_json({"error": "Analysis exceeded the time limit. Try this decision again."}, 504)
             except (OSError, ValueError, subprocess.CalledProcessError):
@@ -367,7 +392,15 @@ def make_server(
             finally:
                 scenario_slot.release()
 
-    return ThreadingHTTPServer((host, port), Handler)
+    class ViewerServer(ThreadingHTTPServer):
+        def server_close(self):
+            super().server_close()
+            try:
+                star.close(clear=bool(star_url))
+            except SQLAlchemyError:
+                print("Could not clear this launch's audit records from the database.", file=sys.stderr)
+
+    return ViewerServer((host, port), Handler)
 
 
 def main():
@@ -404,4 +437,5 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     main()
