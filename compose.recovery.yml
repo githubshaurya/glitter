@@ -1,0 +1,14 @@
+# Mount a dedicated recovery share before starting Postgres with this override.
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=30s
+      - -c
+      - "archive_command=/bin/sh /ops/pitr.sh archive '%p' '%f'"
+    volumes:
+      - "${TRADER_RECOVERY_TARGET:?Set TRADER_RECOVERY_TARGET to a dedicated durable recovery share}:/recovery"
+      - ./tools/pitr.sh:/ops/pitr.sh:ro

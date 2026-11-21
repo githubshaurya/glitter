@@ -40,6 +40,11 @@ class Deadline:
         result.end = min(self.end, self.clock() + max(0, budget_s))
         return result
 
+    def before(self, reserve_s: float, per_call_s: float) -> "Deadline":
+        result = self.child(per_call_s)
+        result.end = min(result.end, self.end - reserve_s)
+        return result
+
     def timeout_for(self, per_call_s: float) -> float:
         remaining = min(per_call_s, self.remaining())
         if remaining <= 0:

@@ -50,12 +50,17 @@ app.add_typer(council_app, name="council")
 
 @council_app.command("replay")
 def council_replay(
-    data_dir: Path, output_dir: Path, profile: str = "primary", rule_only: bool = False, feed: str = "sip"
+    data_dir: Path, output_dir: Path, profile: str = "primary", rule_only: bool = False, feed: str = "sip",
+    holding_period: str = "intraday",
 ):
     """Replay October 21-25, 2024 through the stored-feature council and local simulator."""
     from trader.backtest.commands import replay
 
-    result = replay(data_dir, output_dir, profile, rule_only, feed)
+    if holding_period not in ("intraday", "overnight"):
+        raise typer.BadParameter("Choose intraday or overnight.")
+    result = replay(data_dir, output_dir, profile, rule_only, feed, holding_period=holding_period)
+    if result.get("stop_reason"):
+        console.print(f"Replay stopped · {result['stop_reason']}")
     console.print_json(data=result["metrics"])
 
 
@@ -98,6 +103,8 @@ SERVICES = [
     "watchdog",
     "paper-run",
     "market-data",
+    "news",
+    "market-backup",
 ]
 
 
@@ -141,9 +148,74 @@ def run(
         from trader.services.paper_run import main
     elif service == "market-data":
         from trader.services.market_data import main
+    elif service == "news":
+        from trader.services.news import main
+    elif service == "market-backup":
+        from trader.services.market_data import backup_main as main
     else:
         raise typer.BadParameter(f"unknown service {service!r}; choose from {SERVICES}")
     main()
+
+
+@app.command("tick-source")
+def tick_source(
+    symbol: str, start: Annotated[datetime, typer.Option("--from")],
+    end: Annotated[datetime, typer.Option("--until")],
+    out: Annotated[Path | None, typer.Option(help="Export verified tape as JSONL.")] = None,
+) -> None:
+    """Select one fully recovered tape for the requested interval."""
+    from datetime import UTC
+    from tempfile import NamedTemporaryFile
+
+    from trader.marketdata.archive import TickArchive
+    from trader.marketdata.massive import covered_feed
+
+    # Typer parses exchange-independent inputs as UTC wall time.
+    start = start.replace(tzinfo=start.tzinfo or UTC)
+    end = end.replace(tzinfo=end.tzinfo or UTC)
+    cfg = get_trading_config()
+    store = _store()
+    symbol = symbol.upper()
+    feed = covered_feed(store, cfg.data_feed, [symbol], start, end)
+    summary = {"symbol": symbol, "start": start.isoformat(), "end": end.isoformat(),
+               "feed": feed, "coverage_verified": bool(feed)}
+    if feed and out is not None:
+        archive = TickArchive(store, feed)
+        temp_path = None
+        count = 0
+        try:
+            with NamedTemporaryFile(mode="w", encoding="utf-8", dir=out.parent, delete=False) as stream:
+                temp_path = Path(stream.name)
+                for kind in ("q", "t", "b"):
+                    for row in archive.iter_events(symbol, kind, start, end):
+                        stream.write(json.dumps({
+                            "feed": feed, "symbol": symbol, "kind": kind,
+                            "origin": row.origin, "event_time_ns": row.event_time_ns, "payload": row.payload,
+                        }, separators=(",", ":")) + "\n")
+                        count += 1
+            temp_path.replace(out)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+        summary.update(export=str(out), rows=count)
+    console.print_json(data=summary)
+    if feed is None:
+        raise typer.Exit(1)
+
+
+@app.command("paper-opening-report")
+def paper_opening_report(
+    day: str, out: Path, minutes: Annotated[int, typer.Option(min=1, max=120)] = 60,
+) -> None:
+    """Export live opening latency and independently match Alpaca paper orders."""
+    from trader.reporting.paper_open import opening_report
+    from trader.services.common import make_broker
+    from trader.services.paper_run import save
+
+    settings, cfg = get_settings(), get_trading_config()
+    result = opening_report(_store(), make_broker(settings, cfg, "live"), cfg, date.fromisoformat(day), minutes=minutes)
+    save(out, result)
+    console.print_json(data=result)
 
 
 @app.command("kafka-init")

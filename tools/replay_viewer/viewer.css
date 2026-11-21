@@ -57,6 +57,10 @@ h1 { font: 400 clamp(2.5rem, 6vw, 4.25rem)/1 Georgia, serif; letter-spacing: -.0
 .scenario-fields label { display: grid; gap: 5px; color: var(--muted); font-size: .81rem; }
 .scenario-fields input, .scenario-fields select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--bg); font: .89rem var(--mono); }
 .scenario-fields input[name="symbol"] { text-transform: uppercase; }
+.simulation-switch { display: inline-flex; align-items: center; gap: 8px; font-size: .89rem; }
+.simulation-switch input { accent-color: var(--mint); }
+.simulation-experiments { margin: 10px 0; border-top: 1px solid var(--line); }
+.simulation-experiments .scenario-fields { margin-bottom: 8px; }
 .form-footer { display: flex; align-items: center; gap: 12px; margin: 14px 0 8px; }
 .run-button { border: 1px solid var(--mint); border-radius: 4px; padding: 8px 14px; color: var(--bg); background: var(--mint); font-weight: 600; flex-shrink: 0; }
 .run-button:disabled { opacity: .65; cursor: progress; }
@@ -150,6 +154,9 @@ th { color: var(--muted); font-weight: 400; }
   .history-list { max-height: 220px; }
 }
 @media (max-width: 560px) {
+  .simulation-trade-table table { min-width: 36rem; }
+  .simulation-trade-table :is(th, td) { overflow-wrap: normal; }
+  .simulation-trade-table :is(th, td):not(:last-child) { white-space: nowrap; }
   .scenario-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .masthead-inner { font-size: .64rem; letter-spacing: 0; }
   .masthead-inner, .mode-switch { flex-wrap: wrap; }

@@ -78,6 +78,13 @@ def enrich_content(fs, content, cfg):
         )
         content["meta"]["news"][symbol] = meta
         selected[symbol] = relevant
+        if content.get("feature_slot") and cfg.features.rolling_enabled:
+            sent, ret, volz = (number(values, name) for name in ("news_sent_ewm_60m", "ret_15m", "volz_tod_15m"))
+            values["news_confirmed"] = dict(
+                v=bool(sent and ret and sent * ret > 0 and volz is not None and volz >= 1.5),
+                status="OK" if sent is not None else "MISSING", version="news-confirmation-v2", age_s=0,
+                quality={"source": "stored news and pinned price features"},
+            )
         weighted = sum(a["effective_weight"] * a.get("features", {}).get("sentiment", 0) for a in relevant)
         effective = weighted / max(1, sum(a["effective_weight"] for a in relevant))
         values["news_effective_sentiment"] = dict(

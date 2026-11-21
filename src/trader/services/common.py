@@ -35,11 +35,11 @@ class ServiceContext:
             log.exception("heartbeat.failed")
 
 
-def make_broker(settings: Settings, cfg: TradingConfig, lane: str) -> Broker:
+def make_broker(settings: Settings, cfg: TradingConfig, lane: str, *, rate_limit_per_minute: int = 150) -> Broker:
     from trader.broker.alpaca import AlpacaBroker
 
     key, secret = settings.alpaca_credentials(lane)
-    return AlpacaBroker(key, secret, data_feed=cfg.data_feed)
+    return AlpacaBroker(key, secret, data_feed=cfg.data_feed, rate_limit_per_minute=rate_limit_per_minute)
 
 
 def build_context(
@@ -51,6 +51,7 @@ def build_context(
     broker: Broker | None = None,
     publisher: EventPublisher | None = None,
     store: Store | None = None,
+    broker_rate_limit: int = 150,
 ) -> ServiceContext:
     settings = get_settings()
     configure_logging(settings.log_level, service=service)
@@ -71,7 +72,9 @@ def build_context(
         cfg=cfg,
         store=store or Store(settings.database_url),
         publisher=publisher or (EventProducer(settings.kafka_bootstrap, service) if need_producer else _NoPublisher()),
-        broker=broker if broker is not None else (make_broker(settings, cfg, lane) if need_broker else None),
+        broker=broker if broker is not None else (
+            make_broker(settings, cfg, lane, rate_limit_per_minute=broker_rate_limit) if need_broker else None
+        ),
     )
     from trader.fingerprint import code_hash, config_hash
 

@@ -26,7 +26,8 @@ COPY tools/replay_viewer.py ./tools/replay_viewer.py
 COPY tools/replay_viewer/ ./tools/replay_viewer/
 COPY config/llm_profiles.paper.example.yaml ./config/llm_profiles.yaml
 RUN groupadd --system --gid 10001 viewer \
-    && useradd --system --uid 10001 --gid viewer viewer
+    && useradd --system --uid 10001 --gid viewer viewer \
+    && install -d -m 0750 -o viewer -g viewer /var/cache/glitter
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     EXECUTION_ENABLED=false

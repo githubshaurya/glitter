@@ -1,2 +1,3 @@
 src/trader/llm/tokenizer_data/fb374d419588a4632f3f557e76b4b70aebbca790 binary
 src/trader/llm/tokenizer_data/LICENSE text eol=lf
+tools/pitr.sh text eol=lf

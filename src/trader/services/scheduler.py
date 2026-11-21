@@ -12,6 +12,7 @@ from __future__ import annotations
 import signal
 import threading
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
@@ -19,6 +20,7 @@ import structlog
 from trader.events import topics
 from trader.events.envelope import Envelope, new_id, utcnow
 from trader.events.payloads import CycleSkippedPayload, CycleSnapshotPayload
+from trader.features.wakeup import READY, Wakeup
 from trader.services.common import ServiceContext, build_context
 from trader.strategy.snapshot import build_snapshot
 from trader.timeutil import minutes_since_open, minutes_to_close, next_boundary
@@ -42,6 +44,8 @@ class Scheduler:
     # ------------------------------------------------------------------ emit helpers
     def _skip(self, reason: str, detail: str = "", *, bar_close: datetime | None = None) -> None:
         """Journal a skipped period once per state transition (not every poll)."""
+        from trader.store.dispatch import enabled as dispatch_enabled
+
         if self._last_state == reason and self._last_skip_close == bar_close:
             return
         self._last_state = reason
@@ -53,7 +57,14 @@ class Scheduler:
             correlation_id=cycle_id,
             lane="all",
         )
-        self.ctx.publisher.publish(topics.CYCLES, env)
+        if bar_close is not None or dispatch_enabled(self.ctx):
+            from trader.store.delivery import persist, relay_inline
+
+            with self.ctx.store.session() as session:
+                persist(session, topics.CYCLES, env, cycle_id)
+            relay_inline(self.ctx, cycle_id)
+        else:
+            self.ctx.publisher.publish(topics.CYCLES, env)
         log.info("scheduler.skipped", reason=reason, detail=detail)
 
     def _emit_cycle(self, *, bar_close: datetime | None = None, broker_ahead_seconds: float = 0) -> bool:
@@ -73,7 +84,12 @@ class Scheduler:
             if utcnow() + clock_adjustment >= snapshot_deadline:
                 self._skip("snapshot_deadline", bar_close=bar_close)
                 return False
+        started = monotonic()
         try:
+            if bar_close is not None:
+                from trader.marketdata.readiness import entry_feed_issue
+
+                self.ctx.stats["entry_feed_issue"] = entry_feed_issue(self.ctx, self.cfg.symbols, utcnow())
             if self.cfg.features.enabled and not self.cfg.features.legacy_inline_indicators:
                 from trader.features.collector import stored_snapshot
                 snapshot = stored_snapshot(self.ctx, cycle_id, bar_close=bar_close)
@@ -89,18 +105,12 @@ class Scheduler:
                 return False
             self._failures += 1
             self._last_state = None  # let repeated failures be journaled again after a recovery
-            env = Envelope.of(
-                CycleSkippedPayload(cycle_id=cycle_id, reason="snapshot_failed", detail=repr(exc)[:500]),
-                producer=self.ctx.service,
-                correlation_id=cycle_id,
-                lane="all",
-            )
-            self.ctx.publisher.publish(topics.CYCLES, env)
+            self._skip("snapshot_failed", repr(exc)[:500], bar_close=bar_close)
             log.error("scheduler.snapshot_failed", error=repr(exc), consecutive=self._failures)
             return False
         self._failures = 0
         env = Envelope.of(
-            CycleSnapshotPayload(snapshot=snapshot, bar_close=bar_close),
+            CycleSnapshotPayload(snapshot=snapshot, bar_close=bar_close, feature_read_ms=round((monotonic() - started) * 1000)),
             producer=self.ctx.service,
             correlation_id=cycle_id,
             lane="all",
@@ -109,7 +119,7 @@ class Scheduler:
         if expires_at is not None:
             env.expires_at = expires_at
         if self.cfg.features.enabled:
-            from trader.store.delivery import persist, relay
+            from trader.store.delivery import persist, relay_inline
 
             missed = False
             if snapshot_deadline is not None:
@@ -126,7 +136,7 @@ class Scheduler:
             if missed:
                 self._skip("snapshot_deadline", bar_close=bar_close)
                 return False
-            relay(self.ctx.store, self.ctx.publisher, cycle_id)
+            relay_inline(self.ctx, cycle_id)
         else:
             self.ctx.publisher.publish(topics.CYCLES, env, key="cycle")
         self._last_state = "open"
@@ -143,6 +153,15 @@ class Scheduler:
         return True
 
     # ------------------------------------------------------------------ one tick
+    def wait_seconds(self, at):
+        from trader.council.clock import next_slot
+
+        timing = self.cfg.council_v2
+        if timing.bar_close_deadline_seconds is None or not timing.decision_clock_enabled:
+            return POLL_SECONDS
+        due = next_slot(at, timing.cadence_minutes, timing.settle_seconds)
+        return min(POLL_SECONDS, max(0.05, (due - at).total_seconds()))
+
     def tick(self) -> str:
         if self.ctx.store.is_halted():
             self._skip("halted", self.ctx.store.halt_reason())
@@ -182,13 +201,13 @@ class Scheduler:
                 if due > now:
                     due -= cadence
                 bar_close = due.astimezone(UTC) - timedelta(seconds=timing.settle_seconds)
-                if not 0 <= (now - due).total_seconds() < timing.bar_close_deadline_seconds:
-                    return "idle"
                 if self._next_due == due:
                     return "idle"
                 if self._emit_cycle(bar_close=bar_close, broker_ahead_seconds=max(0, -clock.skew_s)):
                     self._next_due = due
                     return "cycle"
+                if now >= bar_close + timedelta(seconds=timing.snapshot_deadline_seconds):
+                    self._next_due = due
                 return "idle"
             if self._next_due is None:
                 self._next_due = next_slot(now, timing.cadence_minutes, timing.settle_seconds)
@@ -216,15 +235,16 @@ def run(ctx: ServiceContext, stop: threading.Event | None = None) -> None:
     sched = Scheduler(ctx)
     ctx.stats.update(errors=0)
     log.info("scheduler.started", cycle_minutes=ctx.cfg.cycle_minutes, symbols=ctx.cfg.symbols)
-    while not stop.is_set():
-        try:
-            state = sched.tick()
-            ctx.beat(state=state)
-        except Exception:
-            ctx.stats["errors"] = ctx.stats.get("errors", 0) + 1
-            log.exception("scheduler.tick_failed")
-            ctx.beat(state="error")
-        stop.wait(POLL_SECONDS)
+    with Wakeup(ctx.store, READY) as wakeup:
+        while not stop.is_set():
+            try:
+                state = sched.tick()
+                ctx.beat(state=state)
+            except Exception:
+                ctx.stats["errors"] = ctx.stats.get("errors", 0) + 1
+                log.exception("scheduler.tick_failed")
+                ctx.beat(state="error")
+            wakeup.wait(stop, sched.wait_seconds(utcnow()))
     ctx.publisher.flush(5)
     log.info("scheduler.stopped")
 

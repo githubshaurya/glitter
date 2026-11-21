@@ -112,6 +112,7 @@ class ProposalRow(Base):
     qty: Mapped[int] = mapped_column(Integer)
     limit_price: Mapped[float] = mapped_column(Float)
     reference_price: Mapped[float] = mapped_column(Float)
+    analysis_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     notional: Mapped[float] = mapped_column(Float)
     conviction: Mapped[float] = mapped_column(Float)
     rationale: Mapped[str] = mapped_column(Text, default="")

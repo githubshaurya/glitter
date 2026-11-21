@@ -1,0 +1,34 @@
+name: glitter-pg-restore
+
+services:
+  restore:
+    build:
+      context: .
+      dockerfile: Dockerfile.recovery
+    network_mode: none
+    command:
+      - restore
+      - "${TRADER_RESTORE_BACKUP:?Set the verified base backup ID}"
+      - "${TRADER_RESTORE_AT:?Set a UTC timestamp or timestamp with an offset}"
+    environment:
+      RESTORE_USER: ${TRADER_RESTORE_USER:-trader}
+    volumes:
+      - type: bind
+        source: ${TRADER_RECOVERY_TARGET:?Set the archive path on the recovery Docker host}
+        target: /recovery
+        read_only: true
+        bind:
+          create_host_path: false
+      - restored-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          test "$$(psql -U "$$RESTORE_USER" -AtX -c 'SELECT NOT pg_is_in_recovery()')" = t
+      start_period: 30s
+      timeout: 5s
+      interval: 5s
+      retries: 30
+
+volumes:
+  restored-data:

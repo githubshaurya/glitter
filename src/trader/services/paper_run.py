@@ -249,7 +249,7 @@ class PaperRun:
             file.write(json.dumps(event) + "\n")
 
     def checkpoint(self, end, final=False):
-        from trader.reporting.realtime import latency_report
+        from trader.reporting.realtime import expected_bar_closes, latency_report
 
         start = dt(self.plan["sessions"][0]["open"])
         target = self.directory / ("final" if final else end.astimezone(EASTERN).date().isoformat())
@@ -259,7 +259,11 @@ class PaperRun:
         metrics = json.loads((target / "live" / "metrics.json").read_text())
         validate_equity_window(metrics, start, end)
         export_journal(self.ctx.store, target / "journal")
-        save(target / "latency.json", latency_report(self.ctx.store, start, end))
+        save(target / "latency.json", latency_report(
+            self.ctx.store, start, end,
+            expected_closes=expected_bar_closes(self.plan["sessions"], self.ctx.cfg, end),
+            cutoff_ms=1000 * (self.ctx.cfg.council_v2.bar_close_deadline_seconds or 45),
+        ))
         experiment_evidence(self.ctx, target, start, min(end, start + timedelta(hours=3)))
         database_evidence(self.ctx.store, target / "database")
         inherited = self.plan.get("initial_inventory", [])

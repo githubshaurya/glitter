@@ -11,6 +11,11 @@ const outcomeNames = {
   NO_CANDIDATE: "No candidate", DEADLINE: "Deadline elapsed", SESSION_CUTOFF: "Session cutoff",
 };
 const roles = ["TECHNICAL", "NEWS", "REGIME", "LIQUIDITY", "PORTFOLIO", "CHAIR", "SKEPTIC"];
+const reviewSkipNotes = {
+  NO_RELEVANT_ARTICLES: "No relevant articles at decision time.",
+  WAIT_ONLY: "WAIT was the only executable choice.",
+  REQUIRED_REVIEW_UNAVAILABLE: "A required review was unavailable.",
+};
 const state = {
   view: "simulation", savedRun: null, analysis: null, run: null, cycle: null, detail: null, window: 10,
   expiryTimer: null, history: [], historySelection: null,
@@ -58,7 +63,7 @@ function showJson(value) {
 function starAudit(detail) {
   return fold("STAR audit", () => {
     const {decision, role_logs, fills} = detail.star;
-    const reports = {...detail.result.reports, CHAIR: detail.result.draft, SKEPTIC: detail.result.skeptic};
+    const reports = {...detail.result?.reports, CHAIR: detail.result?.draft, SKEPTIC: detail.result?.skeptic};
     const content = node("div");
     const dimensions = node("dl", null, "metrics");
     for (const [label, key] of [["Trading date (ET)", "date"], ["Instrument", "instrument"],
@@ -69,6 +74,8 @@ function starAudit(detail) {
     content.append(table(["Decision", "Action", "Outcome", "Latency (ms)"], [
       [decision.id, decision.action.toUpperCase(), outcomeNames[decision.outcome] || decision.outcome, decision.latency_ms],
     ]));
+    const reasons = detail.result?.reason_codes || [];
+    if (reasons.length) content.append(node("p", reasons.map(code => code.replaceAll("_", " ").toLowerCase()).join(" · "), "quiet"));
     const filter = node("select", null, "audit-role-filter");
     filter.setAttribute("aria-label", "Filter role logs");
     for (const role of ["All roles", ...new Set(role_logs.map(log => log.role))]) {
@@ -84,8 +91,11 @@ function starAudit(detail) {
         log.latency_ms ?? "—",
       ])));
       for (const log of matching) {
+        const skip = reviewSkipNotes[detail.result?.role_audit?.[log.role]?.skip_reason];
         if (!log.sequence && reports[log.role]) {
           logTable.append(fold(`${log.role} recorded verdict`, () => showJson(reports[log.role])));
+        } else if (!log.sequence && skip) {
+          logTable.append(node("p", `${log.role} · ${skip}`, "quiet"));
         } else if (log.sequence) {
           const call = detail.attempts.filter(attempt => attempt.role === log.role)[log.sequence - 1];
           if (call) logTable.append(attemptDetails(call));
@@ -339,13 +349,20 @@ function renderCouncil() {
     const explanation = signalConflict && !pre.signals.some((signal) => signal.eff > 0)
       ? "Bearish evidence blocked a long entry."
       : signalConflict ? "An opposing signal blocked a long entry."
-      : checks?.score_threshold && !checks?.signal_support
-      ? "The score passed. Directional support failed: one strong signal or two moderate signals were required."
+      : pre.reasons.includes("INSUFFICIENT_SIGNAL_SUPPORT") || (checks?.score_threshold && !checks?.signal_support)
+      ? "The score passed the threshold. Directional support requires one strong signal or two moderate signals."
       : pre.reasons.includes("NO_SIGNAL_ABOVE_THRESHOLD") ? "Entry score or signal support was below the required level." : "";
     summary.append(node("p", `Entry score ${pre.S.toFixed(2)} / ${pre.threshold_eff.toFixed(2)} required`));
     if (scores) summary.append(node("p", scores, "quiet"));
     if (pre.gates.length) summary.append(node("p", `Verified gates · ${pre.gates.map(gate => `${gate.role.toLowerCase()} ${gate.state.toLowerCase()}`).join(" · ")}`, "quiet"));
     if (explanation) summary.append(node("p", explanation, "quiet"));
+    if (pre.exit_checks) {
+      const exit = result.arbiter?.[symbol] ?? pre;
+      const label = exit.exit_ok ? "Exit eligible for Chair review"
+        : !exit.exit_checks.sellable_inventory ? "No available whole shares to sell"
+        : !exit.exit_checks.bearish_threshold ? "Bearish evidence missed the exit threshold" : "Exit review unavailable";
+      summary.append(node("p", `Exit threshold ${exit.exit_threshold.toFixed(2)} or lower · ${label}`, "quiet"));
+    }
     trace.append(summary);
   }
   const phases = state.detail.phase_timings;
@@ -416,6 +433,7 @@ function renderCouncil() {
       let skipped = "This role did not run for this decision.";
       if (role === "CHAIR" && pre && !pre.entry_ok && !pre.exit_ok) skipped = "This run stopped at the entry and exit checks before chair review.";
       if (role === "SKEPTIC" && !result.draft) skipped = "No chair assessment was available to review.";
+      skipped = reviewSkipNotes[result.role_audit?.[role]?.skip_reason] || skipped;
       note.append(node("p", attempted ? "No validated report. See the recorded model attempts." : skipped, "quiet"));
     }
     if (failure) {
@@ -463,12 +481,67 @@ function attemptDetails(attempt) {
   });
 }
 
+function renderSizing(target, sizing) {
+  const capNames = {
+    per_order: "per-order cap", symbol_notional: "ticker dollar cap", symbol_equity: "ticker equity cap",
+    buying_power: "available buying power", aggregate_headroom: "remaining account exposure",
+    conviction_target: "effective conviction", loss_to_stop: "loss-to-stop cap",
+  };
+  for (const row of sizing ?? []) {
+    const action = orderAction(row.side, row.position_effect);
+    const label = `${action} ${row.symbol} · ${row.shares} ${row.shares === 1 ? "share" : "shares"}`;
+    const why = row.pre_stop_cap_shares != null
+      ? `${row.pre_stop_cap_shares} → ${row.shares} shares within the ${cash(row.stop_budget_usd)} stop-risk budget`
+      : row.adjusted_budget_usd != null
+      ? `${cash(row.adjusted_budget_usd)} after ${row.gate_multiplier}× risk sizing · ${cash(row.collateral_price ?? row.limit_price)} per share · ${capNames[row.binding_cap]}`
+      : row.available_shares != null ? `${row.available_shares} whole shares available · ${cash(row.limit_price)} limit`
+      : `Sizing data unavailable · ${row.unavailable ?? "required input"}`;
+    target.append(node("p", `${label} · ${why}`, "quiet execution-line"));
+    if (row.caps_usd) {
+      target.append(fold("Sizing limits", table(["Limit", "Budget"], Object.entries(row.caps_usd).map(
+        ([name, amount]) => [capNames[name] ?? name, cash(amount)],
+      ))));
+    }
+  }
+}
+
+function orderAction(side, effect) {
+  if (effect === "short") return "SHORT SELL";
+  if (effect === "cover") return "BUY TO COVER";
+  return side?.toUpperCase();
+}
+
+function renderExecutableOptions(target, result) {
+  const plan = Object.values(result.arbiter || {})[0];
+  if (!plan?.options) return;
+  target.append(fold("Executable options", () => {
+    const sheet = node("div");
+    if (plan.entry_policy === "calibrated_payoff") {
+      sheet.append(node("p", "Entry qualification: cost-adjusted payoff and execution limits.", "quiet"));
+    }
+    const selected = result.draft?.option_id || result.decisions?.[0]?.option_id;
+    sheet.append(table(["Choice", "Max shares", "Limit", "Shares after fill", "Estimated net"], Object.entries(plan.options).map(([id, choice]) => [
+      id === selected ? `${id} · selected` : id, choice.max_shares,
+      choice.limit_price == null ? "—" : cash(choice.limit_price),
+      choice.resulting_position_shares ?? "—",
+      choice.forecast?.expected_net_dollars != null ? cash(choice.forecast.expected_net_dollars)
+        : choice.forecast?.mean_per_opportunity_bps != null ? `${display(choice.forecast.mean_per_opportunity_bps)} bps vs. closing now` : "—",
+    ])));
+    for (const [id, reason] of Object.entries(plan.size_blocks || {})) {
+      sheet.append(node("p", `${id} · ${reason.replaceAll("_", " ").toLowerCase()}`, "quiet"));
+    }
+    return sheet;
+  }));
+}
+
 function renderExecution() {
-  const {result, risk, orders, fills} = state.detail;
+  const {result, risk, orders, fills, sizing} = state.detail;
   const target = $("#execution");
   target.replaceChildren();
   const reasons = (result.reason_codes || []).map((reason) => reason.replaceAll("_", " ").toLowerCase());
   if (reasons.length) target.append(node("p", reasons.join(" · "), "quiet execution-line"));
+  renderExecutableOptions(target, result);
+  renderSizing(target, sizing);
   if (!risk.length) target.append(node("p", "No proposal reached the risk gate.", "execution-line"));
   for (const verdict of risk) {
     const passed = verdict.checks?.filter((check) => check.passed).length || 0;
@@ -487,13 +560,17 @@ function renderExecution() {
   }
 }
 
-function recordedRecommendation({recommendation, result, outcome, latest_error}) {
+function recordedRecommendation({recommendation, result, outcome, latest_error, scenario, risk}) {
   if (latest_error) return "Snapshot expired · 0 shares";
   const status = result?.outcome || outcome;
   if (status === "DECIDED_NO_TRADE") return "No trade · review unavailable";
-  if (status.startsWith("INCOMPLETE") && !recommendation.shares) {
+  if (status?.startsWith("INCOMPLETE") && !recommendation.shares) {
     return "Analysis incomplete · 0 shares";
   }
+  if (status === "DECIDED_TRADE" && !recommendation.shares) {
+    return risk?.some(verdict => !verdict.approved) ? "No order · risk rejected" : "No order · sizing blocked";
+  }
+  if (status === "DECIDED_HOLD" && scenario?.held_shares === 0) return "No trade · stayed flat";
   return `${recommendation.action.toUpperCase()} · ${recommendation.shares} ${recommendation.shares === 1 ? "share" : "shares"}`;
 }
 
@@ -505,7 +582,7 @@ function renderRecommendation(detail) {
   const expired = detail.latest_error || (remaining !== null && remaining <= 0);
   const text = expired ? "Snapshot expired · 0 shares" : recordedRecommendation(detail);
   const maxNew = detail.evidence.feasibility?.[detail.scenario.symbol]?.max_new_notional_usd;
-  target.replaceChildren(node("strong", text, !expired && recommendation.shares ? "positive" : ""));
+  target.replaceChildren(node("strong", text, !expired && recommendation.action === "buy" ? "positive" : ""));
   if (!expired && recommendation.shares) {
     target.append(node("span", `${cash(recommendation.limit_price)} limit · ${cash(recommendation.notional)} notional`));
   }
@@ -598,13 +675,69 @@ function showWorkspace(view) {
   $("#desk").classList.toggle("is-history", view === "history");
   $("#analysis-controls").hidden = view !== "analysis";
   $("#simulation").hidden = view !== "simulation";
+  $("#audit-explorer").hidden = view !== "audits";
   $("#history-rail").hidden = view !== "history";
   $("#replay-rail").hidden = view !== "replay";
   $("#history-chair").hidden = true;
   $("#metrics").replaceChildren();
-  for (const name of ["analysis", "history", "replay", "simulation"]) {
+  for (const name of ["analysis", "history", "replay", "simulation", "audits"]) {
     $(`#show-${name}`).setAttribute("aria-pressed", String(name === view));
   }
+}
+
+let nextAuditPage = null;
+let auditQuery = 0;
+
+async function selectAudit(item) {
+  const target = $("#audit-detail");
+  const loading = node("p", "Loading audit…", "quiet");
+  target.replaceChildren(loading);
+  try {
+    const audit = await read(`/api/audits/${encodeURIComponent(item.id)}`);
+    if (!target.contains(loading)) return;
+    const view = starAudit(audit);
+    view.open = true;
+    target.replaceChildren(node("h3", `${item.instrument} · ${item.date}`), view);
+  } catch (error) {
+    if (target.contains(loading)) loading.textContent = error.message;
+  }
+}
+
+async function loadAudits(before = null) {
+  const request = ++auditQuery;
+  const status = $("#audit-status");
+  const filters = new URLSearchParams();
+  for (const [name, value] of new FormData($("#audit-query"))) if (value.trim()) filters.set(name, value.trim());
+  if (before) filters.set("before", before);
+  $("#audit-next").hidden = true;
+  $("#audit-detail").replaceChildren();
+  status.textContent = "Loading audits…";
+  try {
+    const {items, next_cursor} = await read(`/api/audits?${filters}`);
+    if (request !== auditQuery || state.view !== "audits") return;
+    const list = $("#audit-list");
+    list.replaceChildren();
+    for (const item of items) {
+      const button = node("button", null, "slot history-slot");
+      button.type = "button";
+      button.append(node("strong", `${item.instrument} · ${item.date}`),
+        node("span", `${time.format(new Date(item.as_of))} ET · ${outcomeNames[item.outcome] || item.outcome}`));
+      button.addEventListener("click", () => selectAudit(item));
+      list.append(button);
+    }
+    nextAuditPage = next_cursor;
+    $("#audit-next").hidden = !nextAuditPage;
+    status.textContent = items.length ? `${items.length} audits on this page` : "No audits match these filters.";
+  } catch (error) {
+    if (request === auditQuery && state.view === "audits") status.textContent = error.message;
+  }
+}
+
+function showAudits() {
+  showWorkspace("audits");
+  $("#title").textContent = "Audit explorer";
+  $("#run-description").textContent = "Find recorded decisions by date, instrument, strategy, and council role.";
+  loadAudits();
 }
 
 function renderHistoryList() {
@@ -715,8 +848,20 @@ function showAnalysis() {
 }
 
 const secondTime = new Intl.DateTimeFormat("en-US", {...ny, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"});
-const runState = {queued: "Queued", loading: "Loading Alpaca history", running: "Council running", completed: "Complete", failed: "Stopped"};
-const activeRun = (status) => ["queued", "loading", "running"].includes(status);
+const runState = {
+  queued: "Queued", loading: "Loading Alpaca history", running: "Council running", waiting_for_quota: "Waiting for model quota",
+  completed: "Complete", completed_with_open_position: "Finished with an open position",
+  completed_with_carry: "Complete · position carried", incomplete_review: "The council did not complete a decision",
+  failed: "Stopped",
+};
+const activeRun = (status) => ["queued", "loading", "running", "waiting_for_quota"].includes(status);
+const reviewStatus = { full: "Full review", degraded: "Degraded review", guarded: "Guard blocked", incomplete: "Incomplete review" };
+const decisionStatuses = {
+  no_setup: "No qualifying setup", review_failed: "Review failed", trade_blocked: "Trade blocked",
+  insufficient_payoff_evidence: "Insufficient payoff evidence",
+  chair_wait: "Chair chose WAIT", trade_selected: "Trade selected", order_unfilled: "Order unfilled",
+  order_filled: "Order filled",
+};
 
 async function openSimulationDecision(id, decision, button) {
   const audit = $("#simulation-audit");
@@ -726,19 +871,39 @@ async function openSimulationDecision(id, decision, button) {
     const detail = await read(`/api/simulations/${id}/decisions/${decision.index}`);
     if (!audit.contains(loading)) return;
     const {result, attempts} = detail;
-    const heading = node("h3", `Council audit · ${secondTime.format(new Date(detail.as_of))} ET`);
-    const note = [outcomeNames[result.outcome] || result.outcome, ...(result.reason_codes || [])].join(" · ");
+    const heading = node("h3", `${decision.index === "cutoff" ? "Risk exit audit" : "Council audit"} · ${secondTime.format(new Date(detail.as_of))} ET`);
+    const note = [decisionStatuses[detail.decision_status] || outcomeNames[result.outcome] || result.outcome,
+      reviewStatus[detail.review_status], ...(result.reason_codes || [])].filter(Boolean).join(" · ");
     audit.replaceChildren(heading, node("p", note, "quiet"));
+    const mark = detail.portfolio_mark;
+    if (mark && mark.mark_status !== "fresh") {
+      const prior = mark.last_mark_equity == null ? "" : ` · Last valid equity ${cash(mark.last_mark_equity)}`;
+      audit.append(node("p", `Current equity unavailable${prior}`, "warning"));
+    }
     if (detail.star) audit.append(starAudit(detail));
-    const reviewRoles = result.outcome === "SESSION_CUTOFF" ? [] : ["CHAIR", ...roles.filter(name => name !== "CHAIR")];
+    renderSizing(audit, detail.sizing);
+    renderExecutableOptions(audit, result);
+    if (detail.payoff_forecast) audit.append(fold("Payoff forecast", () => showJson(detail.payoff_forecast)));
+    if (detail.exit_review) {
+      const {seconds_left, must_close} = detail.exit_review;
+      audit.append(node("p", `${must_close ? "Final exit review" : "Open position review"} · ${Math.round(seconds_left)} s left`, "quiet"));
+    }
+    const reviewRoles = decision.index === "cutoff" ? [] : ["CHAIR", ...roles.filter(name => name !== "CHAIR")];
     for (const role of reviewRoles) {
+      if (role === "SKEPTIC" && detail.skeptic_enabled === false) continue;
       const report = role === "CHAIR" ? result.draft : role === "SKEPTIC" ? result.skeptic : result.reports?.[role];
       const calls = attempts.filter(call => call.role === role);
       const content = node("div");
-      if (report?.note) content.append(node("p", report.note));
+      const specialist = report?.symbols?.[0];
+      const summary = specialist?.assessment || specialist?.note || report?.note;
+      if (summary) content.append(node("p", summary));
+      for (const text of [specialist?.contrary_evidence || report?.contrary_evidence,
+        specialist?.invalidation || report?.invalidation]) if (text) content.append(node("p", text, "quiet"));
+      const skip = result.role_audit?.[role]?.skip_reason;
+      if (reviewSkipNotes[skip]) content.append(node("p", reviewSkipNotes[skip], "quiet"));
       if (report) content.append(fold("Validated report", () => showJson(report)));
       for (const call of calls) content.append(attemptDetails(call));
-      if (!report && !calls.length) content.append(node("p", "No response was recorded for this role.", "quiet"));
+      if (!report && !calls.length && !skip) content.append(node("p", "No response was recorded for this role.", "quiet"));
       const label = role[0] + role.slice(1).toLowerCase();
       const section = fold(label, content);
       section.open = role === "CHAIR";
@@ -761,6 +926,24 @@ function renderSimulation(run) {
   const title = node("h3", `${run.company || request.symbol} · ${request.day} · ${request.market_time} ET`);
   title.id = "simulation-run-title";
   output.replaceChildren(title, node("p", run.error || runState[run.status], "quiet"));
+  const policy = request.holding_period === "overnight" ? "Overnight allowed" : "Intraday";
+  const maxHold = request.max_hold_minutes ? ` · ${request.max_hold_minutes} min position limit` : "";
+  output.append(node("p", `${policy}${maxHold} · Skeptic ${request.skeptic_enabled === false ? "off" : "on"}`, "quiet"));
+  if (request.review_policy && request.review_policy !== "full") {
+    output.append(node("p", `Review policy · ${request.review_policy.replaceAll("_", " ")}`, "quiet"));
+  }
+  if (run.payoff_sample_count) {
+    const download = node("a", `Download ${run.payoff_sample_count} payoff samples`, "text-button");
+    download.href = `/api/simulations/${run.id}/payoff-samples/download`;
+    download.download = "payoff-samples.jsonl";
+    output.append(download);
+  }
+  if (run.trading_status_source) {
+    const statusSource = { archive_events: "Archived trading status events used",
+      quote_only: "Halt history unavailable · using quote conditions",
+      archive_unavailable: "Trading status archive unavailable · using quote conditions" };
+    output.append(node("p", statusSource[run.trading_status_source], "quiet"));
+  }
   if (activeRun(run.status)) {
     const progress = node("progress");
     progress.max = request.duration_minutes;
@@ -772,23 +955,54 @@ function renderSimulation(run) {
     const totals = node("dl", null, "metrics");
     totals.append(pair("Starting cash", cash(request.budget_usd)), pair("Final cash", cash(run.final_cash)),
       pair("Realized P&L", cash(run.realized_pnl)), pair("Return", percent(run.return_pct)));
+    if (run.status === "completed_with_carry") totals.append(pair("Marked equity", cash(run.final_equity)));
+    if (run.final_equity == null && run.last_mark_equity != null) {
+      totals.append(pair("Last valid equity", cash(run.last_mark_equity)));
+    }
     output.append(totals);
-    if (run.open_shares) output.append(node("p", `${run.open_shares} shares remained open. The cutoff order could not fill.`, "warning"));
+    if (run.complete_reviews != null) {
+      const grades = [`${run.complete_reviews} full`, `${run.degraded_reviews || 0} degraded`,
+        `${run.incomplete_reviews || 0} incomplete`, `${run.blocked_slots || 0} guard blocked`];
+      output.append(node("p", grades.join(" · "), run.degraded_reviews || run.incomplete_reviews ? "warning" : "quiet"));
+    }
+    if (run.stop_bps != null) {
+      output.append(node("p", `Stop loss ${run.stop_bps / 100}% · Take profit ${run.target_bps / 100}%`, "quiet"));
+    }
+    if (run.open_shares) {
+      const position = run.open_shares < 0 ? "short" : "long";
+      const description = run.status === "completed_with_carry"
+        ? "at the end of the replay window." : "after the cutoff order.";
+      output.append(node("p", `${Math.abs(run.open_shares)} shares remained ${position} ${description}`,
+        run.status === "completed_with_carry" ? "quiet" : "warning"));
+    }
   }
   const ledger = node("section");
   ledger.append(node("h3", "Trade history"));
+  const exitLabels = {session_cutoff: "session safety exit", holding_deadline: "holding deadline safety exit",
+    stop_loss: "stop loss", take_profit: "take profit"};
   if (orders.length) {
-    ledger.append(table(["Submitted (ET)", "Side", "Shares", "Fill price", "Status"], orders.map(order => [
-      secondTime.format(new Date(order.submitted_at)), order.side.toUpperCase(), order.qty,
+    const tradeTable = table(["Submitted (ET)", "Side", "Requested", "Filled", "Fill price", "Status"], orders.map(order => [
+      secondTime.format(new Date(order.submitted_at)), orderAction(order.side, order.position_effect), order.qty,
+      order.filled_qty ?? 0,
       order.fill_price == null ? "—" : cash(order.fill_price),
-      (order.status === "filled" ? "Filled" : (order.unfilled_reason || order.status).replaceAll("_", " ")) +
-        (order.reason === "session_cutoff" ? " · cutoff exit" : ""),
-    ])));
+      (order.status === "filled" ? "Filled" : order.status === "partial" ? "Partial fill · remainder canceled"
+        : (order.unfilled_reason || order.status).replaceAll("_", " ")) +
+        (exitLabels[order.reason] ? ` · ${exitLabels[order.reason]}`
+          : order.decision_source === "code" ? ` · ${order.option_id ? "Replay policy" : "Timed risk reduction"}`
+            : order.reason === "council" ? ` · ${order.exit_review === "final" ? "Chair deadline exit"
+            : order.exit_review === "discretionary" ? "Chair exit" : "Council"}` : "") +
+        (order.stop_slippage_usd > 0 ? ` · ${cash(order.stop_slippage_usd)} beyond stop` : ""),
+    ]));
+    tradeTable.classList.add("simulation-trade-table");
+    tradeTable.setAttribute("role", "region");
+    tradeTable.setAttribute("aria-label", "Trade history");
+    tradeTable.tabIndex = 0;
+    ledger.append(tradeTable);
   } else {
     ledger.append(node("p", "No simulated orders recorded.", "quiet"));
   }
-  if (orders.some(order => order.reason === "session_cutoff")) {
-    const cutoff = node("button", "View cutoff audit", "text-button");
+  if (orders.some(order => order.decision_index == null && exitLabels[order.reason])) {
+    const cutoff = node("button", "View automatic exits", "text-button");
     cutoff.type = "button";
     cutoff.addEventListener("click", () => openSimulationDecision(run.id, {index: "cutoff"}, cutoff));
     ledger.append(cutoff);
@@ -801,9 +1015,14 @@ function renderSimulation(run) {
     const button = node("button", null, "slot");
     button.type = "button";
     const mark = secondTime.format(new Date(decision.as_of));
-    const verdict = outcomeNames[decision.outcome] || decision.outcome;
-    const outcome = decision.execution_failure ? `${verdict} · ${decision.execution_failure.replaceAll("_", " ")}` : verdict;
-    button.append(node("strong", mark), node("span", outcome), node("span", `${decision.elapsed_s.toFixed(2)} s`));
+    const action = orderAction(decision.action, decision.position_effect);
+    const verdict = decisionStatuses[decision.decision_status] || outcomeNames[decision.outcome] || decision.outcome;
+    const outcome = [action && action !== verdict ? action : null, verdict,
+      decision.execution_failure?.replaceAll("_", " ")].filter(Boolean).join(" · ");
+    const wait = decision.replay_quota_wait_s ? ` · ${decision.replay_quota_wait_s.toFixed(1)} s replay queue` : "";
+    const label = decision.review_status === "degraded" ? `${outcome} · Degraded review` : outcome;
+    const latency = decision.input_to_decision_s ?? decision.elapsed_s;
+    button.append(node("strong", mark), node("span", label), node("span", `${latency.toFixed(2)} s${wait}`));
     button.addEventListener("click", () => openSimulationDecision(run.id, decision, button));
     rows.append(button);
   }
@@ -829,7 +1048,7 @@ async function refreshSimulations() {
       button.type = "button";
       button.setAttribute("aria-current", String(run.id === state.simulationId));
       button.append(node("strong", `${run.request.symbol} · ${run.request.day}`),
-        node("span", `${run.request.market_time} ET · ${run.filled_orders} fills`));
+        node("span", `${run.request.market_time} ET · ${run.filled_orders} ${run.filled_orders === 1 ? "fill" : "fills"}`));
       button.addEventListener("click", () => {
         state.simulationId = run.id;
         $("#simulation-audit").replaceChildren();
@@ -857,6 +1076,14 @@ async function startSimulation(event) {
   const submit = event.currentTarget.querySelector("button[type=submit]");
   const status = $("#simulation-status");
   const input = Object.fromEntries(new FormData(event.currentTarget));
+  input.allow_simulated_short = event.currentTarget.elements.allow_simulated_short.checked;
+  input.skeptic_enabled = event.currentTarget.elements.skeptic_enabled.checked;
+  for (const key of ["mask_identity", "blind_technical", "record_payoff_samples"]) {
+    input[key] = event.currentTarget.elements[key].checked;
+  }
+  if (input.sector_benchmark) input.sector_benchmark = input.sector_benchmark.trim().toUpperCase();
+  if (!input.sector_benchmark) delete input.sector_benchmark;
+  if (!input.max_hold_minutes) delete input.max_hold_minutes;
   submit.disabled = true;
   status.textContent = "Starting simulation…";
   try {
@@ -872,7 +1099,7 @@ async function startSimulation(event) {
 
 function showSimulation() {
   showWorkspace("simulation");
-  $("#title").textContent = "Intraday simulation";
+  $("#title").textContent = "Historical simulation";
   $("#run-description").textContent = "Replay a past market window with the trading council. History lasts until you stop the app.";
   refreshSimulations();
 }
@@ -900,9 +1127,17 @@ $("#analysis-form").addEventListener("submit", runAnalysis);
 $("#refresh-account").addEventListener("click", refreshAccount);
 $("#show-analysis").addEventListener("click", showAnalysis);
 $("#show-history").addEventListener("click", showHistory);
+$("#history-show-simulations").addEventListener("click", showSimulation);
 $("#history-search").addEventListener("input", renderHistoryList);
 $("#show-replay").addEventListener("click", showReplay);
 $("#show-simulation").addEventListener("click", showSimulation);
+for (const role of roles) $("#audit-query select").add(new Option(role, role));
+$("#show-audits").addEventListener("click", showAudits);
+$("#audit-query").addEventListener("submit", event => { event.preventDefault(); loadAudits(); });
+$("#audit-next").addEventListener("click", () => { if (nextAuditPage) loadAudits(nextAuditPage); });
 $("#simulation-form").addEventListener("submit", startSimulation);
+$("#simulation-form").elements.holding_period.addEventListener("change", event => {
+  $("#simulation-form").elements.max_hold_minutes.disabled = event.target.value === "overnight";
+});
 new ResizeObserver(drawCandles).observe($("#candles"));
 showSimulation();

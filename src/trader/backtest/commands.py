@@ -8,12 +8,14 @@ from typing import Any, cast
 from trader.events.payloads import QuoteSnap
 
 
-def replay(data_dir, output_dir, profile="primary", rule_only=False, feed="sip", days=None):
+def replay(data_dir, output_dir, profile="primary", rule_only=False, feed="sip", days=None, *, holding_period="intraday"):
     from alpaca.common.enums import Sort
     from alpaca.data.enums import DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockQuotesRequest
 
+    from trader.backtest.corporate_actions import fetch_actions
+    from trader.backtest.decision import open_alpaca
     from trader.backtest.replay import run_cached_sessions
     from trader.broker.alpaca import _with_deadline
     from trader.config import get_settings, get_trading_config
@@ -66,13 +68,28 @@ def replay(data_dir, output_dir, profile="primary", rule_only=False, feed="sip",
         bid, ask = float(q["bid"]), float(q["ask"])
         return QuoteSnap(symbol="NVDA", bid=bid, ask=ask, mid=(bid + ask) / 2, ts=q["t"])
 
+    sessions = days or ["2024-10-21", "2024-10-22", "2024-10-23", "2024-10-24", "2024-10-25"]
+    actions = None
+    if holding_period == "overnight" and not (Path(data_dir) / "corporate-actions.json").exists():
+        snapshot = Path(output_dir) / "corporate-actions.json"
+        if snapshot.exists():
+            actions = json.loads(snapshot.read_text(encoding="utf-8"))
+        else:
+            with open_alpaca() as client:
+                actions = fetch_actions(client, ["NVDA"], sessions)
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            temporary = snapshot.with_suffix(".tmp")
+            temporary.write_text(json.dumps(actions), encoding="utf-8")
+            temporary.replace(snapshot)
     return run_cached_sessions(
         data_dir,
         output_dir,
         cfg,
-        days or ["2024-10-21", "2024-10-22", "2024-10-23", "2024-10-24", "2024-10-25"],
+        sessions,
         factory,
         execution_quote=historical_quote,
         measure_latency=True,
+        holding_period=holding_period,
+        corporate_actions=actions,
         progress=lambda value: print(json.dumps(value), flush=True),
     )

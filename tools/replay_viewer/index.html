@@ -13,23 +13,64 @@
       <button type="button" id="show-simulation" aria-pressed="true">Simulation</button>
       <button type="button" id="show-analysis" aria-pressed="false">New analysis</button>
       <button type="button" id="show-history" aria-pressed="false">History</button>
+      <button type="button" id="show-audits" aria-pressed="false">Audit explorer</button>
       <button type="button" id="show-replay" aria-pressed="false">Saved replay</button>
     </nav></div>
   </header>
   <main class="frame">
     <section class="intro" aria-labelledby="title">
-      <div><h1 id="title">Intraday simulation</h1><p id="run-description">Replay a past market window with the trading council.</p></div>
+      <div><h1 id="title">Historical simulation</h1><p id="run-description">Replay a past market window with the trading council.</p></div>
       <dl id="metrics" class="metrics" aria-label="Replay results"></dl>
     </section>
-    <section id="simulation" aria-label="Intraday simulation">
+    <section id="simulation" aria-label="Historical simulation">
       <form id="simulation-form">
         <div class="scenario-fields simulation-fields">
           <label>NASDAQ ticker<input name="symbol" placeholder="NVDA" pattern="[A-Za-z][A-Za-z0-9.\-]{0,11}" maxlength="12" required></label>
           <label>Trading date<input type="date" name="day" required></label>
           <label>Start time (ET)<input type="time" name="market_time" value="10:30" required></label>
-          <label>Minutes<input type="number" name="duration_minutes" min="1" max="20" value="20" required></label>
+          <label>Replay length (min)<input type="number" name="duration_minutes" min="1" max="60" value="20" required></label>
           <label>Starting cash ($)<input type="number" name="budget_usd" min="0.01" max="100000000" step="0.01" value="4000" required></label>
+          <label>Entry cooldown (min)<input type="number" name="reentry_cooldown_minutes" min="0" max="30" value="2" required></label>
+          <label>Holding policy<select name="holding_period" aria-describedby="holding-policy-help">
+            <option value="intraday">Intraday</option>
+            <option value="overnight">Overnight allowed</option>
+          </select></label>
+          <label>Max time per position (min)<input type="number" name="max_hold_minutes" min="2" max="59" placeholder="Optional" aria-describedby="holding-policy-help"></label>
+          <label>Review interval while flat (min)<input type="number" name="entry_review_minutes" min="1" max="15" value="1" required></label>
         </div>
+        <p class="quiet" id="holding-policy-help">Intraday reviews open positions each minute. Set a maximum time to give the Chair an earlier exit deadline.</p>
+        <label class="simulation-switch"><input type="checkbox" role="switch" name="skeptic_enabled" checked> Skeptic review</label>
+        <p class="quiet">
+          <label><input type="checkbox" name="allow_simulated_short"> Allow SELL to open or add to a simulated short</label>
+          · Assumes shares could be borrowed on the selected date.
+        </p>
+        <details class="simulation-experiments">
+          <summary>Replay experiments</summary>
+          <div class="scenario-fields simulation-fields">
+            <label>Review policy<select name="review_policy">
+              <option value="full">Full council</option>
+              <option value="rules">Rules only</option>
+              <option value="technical">Technical</option>
+              <option value="technical_news">Technical and News</option>
+              <option value="chair">Technical, News, and Chair</option>
+            </select></label>
+            <label>Skeptic policy<select name="skeptic_policy">
+              <option value="always">Every review when on</option>
+              <option value="targeted">Marginal entries when on</option>
+            </select></label>
+            <label>Payoff forecasts<select name="forecast_policy">
+              <option value="shadow">Record estimates</option>
+              <option value="off">Off</option>
+              <option value="calibrated">Trade on calibrated payoff</option>
+            </select></label>
+            <label>Sector benchmark<input name="sector_benchmark" placeholder="Optional" maxlength="12"></label>
+            <label>Estimated execution delay (s)<input type="number" name="forecast_delay_s" min="0" max="39" value="4"></label>
+            <label>Extra cost (bps)<input type="number" name="forecast_extra_cost_bps" min="0" max="100" step="0.1" value="0"></label>
+          </div>
+          <p class="quiet"><label><input type="checkbox" name="mask_identity"> Mask ticker and date in non-News prompts</label></p>
+          <p class="quiet"><label><input type="checkbox" name="blind_technical"> Hide the baseline score from Technical</label></p>
+          <p class="quiet"><label><input type="checkbox" name="record_payoff_samples"> Export payoff samples for training</label></p>
+        </details>
         <div class="form-footer">
           <button class="run-button" type="submit">Run simulation</button>
           <p id="simulation-status" class="quiet" role="status"></p>
@@ -44,6 +85,25 @@
           <div id="simulation-report"><h3 id="simulation-run-title">Trade history</h3><p class="quiet">Run a simulation to see its orders, fills, and decisions here.</p></div>
           <div id="simulation-audit"></div>
         </article>
+      </div>
+    </section>
+    <section id="audit-explorer" aria-label="Audit explorer" hidden>
+      <form id="audit-query" class="sheet decision-section">
+        <div class="scenario-fields simulation-fields">
+          <label>Trading date (ET)<input type="date" name="day"></label>
+          <label>Ticker<input name="instrument" maxlength="12" placeholder="NVDA"></label>
+          <label>Strategy<input name="strategy" maxlength="80" placeholder="intraday-council"></label>
+          <label>Role<select name="role"><option value="">All roles</option></select></label>
+        </div>
+        <div class="form-footer">
+          <button type="submit" class="run-button">Apply filters</button>
+          <button type="button" id="audit-next" class="text-button" hidden>Next page</button>
+          <p id="audit-status" class="quiet" role="status"></p>
+        </div>
+      </form>
+      <div class="simulation-desk">
+        <nav class="simulation-rail" id="audit-list" aria-label="Matching audits"></nav>
+        <article class="simulation-sheet" id="audit-detail" aria-label="Selected audit"></article>
       </div>
     </section>
     <section id="analysis-controls" class="analysis-controls" aria-label="Analysis setup" hidden>
@@ -78,6 +138,7 @@
       <nav id="history-rail" class="rail history-rail" aria-label="Saved decisions" hidden>
         <label for="history-search">Filter by ticker or company</label>
         <input id="history-search" type="search" autocomplete="off" placeholder="Search stocks">
+        <button type="button" id="history-show-simulations" class="text-button">Simulation trade history</button>
         <p id="history-status" class="quiet" role="status"></p>
         <div id="history-list" class="history-list"></div>
       </nav>

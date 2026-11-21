@@ -14,17 +14,22 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from threading import Event, Thread
 
 import structlog
 
 from trader.alerts import alert
 from trader.broker.base import Broker
+from trader.concurrency import BoundedPool
+from trader.deadline import Deadline, current_deadline, request_budget
 from trader.events import topics
 from trader.events.envelope import Envelope, utcnow
 from trader.events.payloads import (
     CheckResultPayload,
     ControlPayload,
+    CycleSnapshotPayload,
     OrderCommandPayload,
     ProposalPayload,
     VerdictPayload,
@@ -36,6 +41,18 @@ from trader.risk.signing import sign as sign_command
 from trader.services.common import ServiceContext, build_context
 
 log = structlog.get_logger(__name__)
+_BROKER_READS = BoundedPool(5, "risk-broker")
+_PREFLIGHT_READS = BoundedPool(5, "cycle-preflight")
+
+
+@dataclass(frozen=True)
+class Preflight:
+    cycle_id: str
+    account_ref: str
+    generation: int
+    broker_revision: str | None
+    started: datetime
+    values: tuple
 
 
 def client_order_id_for(lane: str, proposal_id: str) -> str:
@@ -51,6 +68,16 @@ class RiskGate:
         self.lane = ctx.lane
         self._pending: dict[str, PendingOrder] = {}
         self._results: dict[str, tuple[Verdict, Envelope | None]] = {}
+        self._checked_identity: tuple[Broker, str] | None = None
+        self._preflight: Preflight | None = None
+
+    def account_binding(self, broker: Broker) -> str | None:
+        if self._checked_identity and self._checked_identity[0] is broker:
+            return self._checked_identity[1]
+        return None
+
+    def bind_account(self, broker: Broker, account_ref: str | None) -> None:
+        self._checked_identity = (broker, account_ref) if account_ref else None
 
     # ------------------------------------------------------------------ in-flight ledger
     def _prune_pending(self) -> None:
@@ -62,28 +89,108 @@ class RiskGate:
                 del self._pending[coid]
 
     # ------------------------------------------------------------------ context from the broker (fresh)
-    def _build_context(self, p: ProposalPayload, env: Envelope) -> RiskContext:
-        store, cfg = self.ctx.store, self.ctx.cfg
-        quote = self.broker.latest_quotes([p.symbol]).get(p.symbol)
-        return RiskContext(
+    def _broker_read(self, name, *args):
+        isolated = getattr(self.broker, "isolated_reader", None)
+        broker = isolated() if isolated else self.broker
+        return getattr(broker, name)(*args)
+
+    def _parallel_state(self, symbol):
+        deadline = current_deadline() or Deadline(self.ctx.cfg.durable_risk.transaction_timeout_seconds)
+        return self._read_state([symbol], deadline, _BROKER_READS)
+
+    def _read_state(self, symbols, deadline, pool):
+        tasks = []
+        try:
+            with request_budget(deadline):
+                tasks.append(pool.submit(self._broker_read, "latest_quotes", symbols))
+                for name in ("clock", "account", "positions", "open_orders"):
+                    tasks.append(pool.submit(self._broker_read, name))
+                return tuple(task.result(timeout=deadline.timeout_for(60)) for task in tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+
+    def broker_revision(self):
+        return self.ctx.store.get_control(f"broker_state_change:{self.lane}")
+
+    def _broker_feed_is_fresh(self, at):
+        stamp = self.ctx.store.get_control(f"broker_feed_verified:{self.lane}")
+        return stamp is not None and 0 <= (at - datetime.fromisoformat(stamp)).total_seconds() <= 90
+
+    def preflight(self, env):
+        if self.ctx.store.is_halted():
+            return
+        snap = env.parse(CycleSnapshotPayload).snapshot
+        started = utcnow()
+        if not self._broker_feed_is_fresh(started):
+            return
+        ref = snap.account.account_id or f"lane:{self.lane}"
+        revision, generation = self.broker_revision(), self.ctx.store.account_generation(ref)
+        deadline = Deadline(min(5, (env.expires_at - started).total_seconds()) if env.expires_at else 5)
+        try:
+            values = self._read_state(sorted(snap.symbols), deadline, _PREFLIGHT_READS)
+        except Exception as exc:
+            log.info("risk.preflight_unavailable", error_type=type(exc).__name__)
+            return
+        if ((values[2].account_id or f"lane:{self.lane}") == ref and self.broker_revision() == revision
+                and self.ctx.store.account_generation(ref) == generation):
+            self._preflight = Preflight(snap.cycle_id, ref, generation, revision, started, values)
+
+    def prepared_state(self, proposal, at):
+        state = self._preflight
+        if state is None or state.cycle_id != proposal.cycle_id or not self._broker_feed_is_fresh(at):
+            return None
+        age_limit = min(5, self.ctx.cfg.risk.max_quote_age_seconds)
+        quote = state.values[0].get(proposal.symbol)
+        if (
+            not 0 <= (at - state.started).total_seconds() <= age_limit
+            or quote is None or quote.ts is None or not 0 <= (at - quote.ts).total_seconds() <= age_limit
+            or self.broker_revision() != state.broker_revision
+            or self.ctx.store.account_generation(state.account_ref) != state.generation
+        ):
+            return None
+        return state
+
+    def _build_context(self, p: ProposalPayload, env: Envelope, *, defer_local=False, prepared=None) -> RiskContext:
+        cfg = self.ctx.cfg
+        if prepared is not None:
+            quotes, clock, account, positions, orders = prepared.values
+        elif defer_local:
+            quotes, clock, account, positions, orders = self._parallel_state(p.symbol)
+        else:
+            quotes = self.broker.latest_quotes([p.symbol])
+            clock, account = self.broker.clock(), self.broker.account()
+            positions, orders = self.broker.positions(), self.broker.open_orders()
+        state = RiskContext(
             proposal=p,
             now=utcnow(),
             limits=cfg.risk,
             allowed_symbols=set(cfg.symbols),
-            clock=self.broker.clock(),
-            account=self.broker.account(),
-            positions=self.broker.positions(),
-            open_orders=self.broker.open_orders(),
-            quote=quote,
-            halted=store.is_halted(),
+            clock=clock,
+            account=account,
+            positions=positions,
+            open_orders=orders,
+            quote=quotes.get(p.symbol),
+            halted=False,
             broker_host=self.broker.host,
-            orders_today=store.orders_today(self.lane),
-            last_order_time=store.last_order_time(self.lane, p.symbol),
+            orders_today=0,
+            last_order_time=None,
             expires_at=env.expires_at,
-            already_executed=store.order_exists(client_order_id_for(self.lane, p.proposal_id)) is not None,
-            consecutive_order_errors=store.consecutive_order_errors(self.lane),
+            already_executed=False,
+            consecutive_order_errors=0,
             pending=list(self._pending.values()),
         )
+        if not defer_local:
+            self.refresh_local_state(state)
+        return state
+
+    def refresh_local_state(self, state: RiskContext):
+        store, proposal = self.ctx.store, state.proposal
+        state.halted = store.is_halted()
+        state.orders_today = store.orders_today(self.lane)
+        state.last_order_time = store.last_order_time(self.lane, proposal.symbol)
+        state.already_executed = store.order_exists(client_order_id_for(self.lane, proposal.proposal_id)) is not None
+        state.consecutive_order_errors = store.consecutive_order_errors(self.lane)
 
     # ------------------------------------------------------------------ handler
     def handle(self, env: Envelope) -> None:
@@ -92,10 +199,13 @@ class RiskGate:
         from trader.risk.durable import authorize, enabled
 
         if enabled(self.ctx):
-            from trader.risk.durable import StateUnavailable, reject
+            from trader.risk.durable import PreflightInvalidated, StateUnavailable, reject
 
             try:
-                authorize(self, env, now=utcnow)
+                try:
+                    authorize(self, env, now=utcnow)
+                except PreflightInvalidated:
+                    authorize(self, env, now=utcnow, use_preflight=False)
             except StateUnavailable as exc:
                 reject(self.ctx, env, f"fresh broker state unavailable: {exc}")
             return
@@ -129,6 +239,7 @@ class RiskGate:
                 )
             cmd_env = None
             if verdict.approved:
+                anchored = p.side == "buy" and p.analysis_entry_price is not None
                 remaining = (
                     (env.expires_at - utcnow()).total_seconds() if env.expires_at else self.ctx.cfg.proposal_ttl_seconds
                 )
@@ -140,7 +251,9 @@ class RiskGate:
                     side=p.side,
                     qty=p.qty,
                     limit_price=p.limit_price,
-                    time_in_force="day",
+                    analysis_entry_price=p.analysis_entry_price if anchored else None,
+                    valid_until=env.expires_at if anchored else None,
+                    time_in_force="ioc" if anchored else "day",
                 )
                 cmd = sign_command(self.ctx.store.command_signing_key(), self.lane, cmd)  # only the gate can mint this
                 cmd_env = Envelope.of(
@@ -151,6 +264,8 @@ class RiskGate:
                     causation_id=env.event_id,
                     ttl_seconds=max(remaining, 30.0),
                 )
+                if anchored:
+                    cmd_env.expires_at = env.expires_at
                 self._pending[coid] = PendingOrder(coid, p.symbol, p.side, p.qty, p.limit_price, utcnow())
             self._results[p.proposal_id] = (verdict, cmd_env)
             if len(self._results) > 500:
@@ -229,7 +344,21 @@ def commands_topic(lane: str) -> str:
 
 
 def run(ctx: ServiceContext) -> None:
+    from trader.store.dispatch import enabled, run_dispatch
+
     gate = RiskGate(ctx)
+    if enabled(ctx):
+        stop = Event()
+        Thread(
+            target=run_dispatch,
+            args=(ctx, "risk-preflight", ("cycle",), gate.preflight, lambda _: None, stop),
+            name="risk-preflight", daemon=True,
+        ).start()
+        try:
+            run_dispatch(ctx, "risk", ("proposal",), gate.handle, lambda env: reject_expired(ctx, env), stop)
+        finally:
+            stop.set()
+        return
     consumer = BaseConsumer(
         bootstrap_servers=ctx.settings.kafka_bootstrap,
         group_id=f"risk-gate-{ctx.lane}",

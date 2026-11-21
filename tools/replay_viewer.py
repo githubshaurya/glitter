@@ -8,15 +8,18 @@ import subprocess
 import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock, Thread
-from urllib.parse import urlsplit
+from threading import Event, Lock, Thread
+from time import monotonic
+from urllib.parse import parse_qs, unquote, urlsplit
 from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from trader.reporting.star import StarJournal, public_attempts
+from trader.backtest.viewer_worker import ViewerWorker
+from trader.reporting.star import StarJournal, preview_audit, public_attempts
 
 ASSETS = Path(__file__).with_name("replay_viewer")
 STATIC = {
@@ -39,6 +42,7 @@ HISTORY_FIELDS = (
     "recommendation",
     "effective_budget_usd",
     "latest_error",
+    "sizing",
     "risk",
     "orders",
     "fills",
@@ -79,6 +83,9 @@ def make_server(
 
     history = {}
     history_lock = Lock()
+    unprojected_history = {}
+    pending_audits = {}
+    pending_lock = Lock()
 
     def remember(path, detail, source):
         try:
@@ -87,6 +94,7 @@ def make_server(
             return
         with history_lock:
             history[summary["id"]] = (order, summary, path)
+            unprojected_history[summary["id"]] = (summary, path)
 
     for source, root in (("analysis", analysis_root), ("test", audit_root)):
         if root is None:
@@ -118,23 +126,52 @@ def make_server(
         fills_by_order.setdefault(fill["order_id"], []).append(fill)
     cycles = {cycle["run_id"]: cycle for cycle in result["cycles"]}
     scenario_slot = Lock()
+    simulation_slot = Lock()
+    workers = {mode: ViewerWorker(mode) for mode in ("decision", "simulation")} if (
+        analysis_root is not None and os.environ.get("TRADER_VIEWER_WARM_WORKERS") == "1"
+    ) else {}
     simulations = {}
+    running_simulations = set()
     simulations_lock = Lock()
+    progress_cache = {}
+    projected_simulations = set()
 
     def simulation_status(run_id, request, folder):
+        path = folder / "progress.json"
         try:
-            progress = json.loads((folder / "progress.json").read_text(encoding="utf-8"))
+            stat = path.stat()
+            version = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            with simulations_lock:
+                cached = progress_cache.get(run_id)
+            if cached and cached[0] == version:
+                progress = cached[1]
+            else:
+                progress = json.loads(path.read_text(encoding="utf-8"))
+                with simulations_lock:
+                    progress_cache[run_id] = (version, progress)
         except FileNotFoundError:
             progress = {"status": "queued", "decisions": [], "orders": []}
+        with simulations_lock:
+            if run_id in running_simulations and progress["status"] not in (
+                "queued", "loading", "running", "waiting_for_quota",
+            ):
+                # The subprocess writes its last result before it exits and releases the run slot.
+                progress = progress | {"status": "running"}
         return {**progress, "request": request, "id": run_id}
 
-    def simulation_audit(run_id, request, folder, index):
-        progress = simulation_status(run_id, request, folder)
+    def end_window_orders(progress):
+        return [order for order in progress["orders"] if order.get("decision_index") is None
+                and order.get("reason") in ("session_cutoff", "holding_deadline", "stop_loss", "take_profit")]
+
+    def simulation_audit(run_id, request, folder, index, progress=None):
+        if progress is None:
+            progress = simulation_status(run_id, request, folder)
         if index == "cutoff":
-            orders = [order for order in progress["orders"] if order.get("reason") == "session_cutoff"]
+            orders = end_window_orders(progress)
             if not orders:
                 raise ValueError("Cutoff execution is unavailable.")
-            detail = {"as_of": orders[0]["submitted_at"], "result": {"outcome": "SESSION_CUTOFF"}, "risk": [],
+            outcome = "SESSION_CUTOFF" if any(o["reason"] == "session_cutoff" for o in orders) else "AUTOMATIC_EXITS"
+            detail = {"as_of": orders[0]["submitted_at"], "result": {"outcome": outcome}, "risk": [],
                       "recommendation": {"action": orders[0]["side"]}}
         else:
             index = int(index)
@@ -143,20 +180,26 @@ def make_server(
             detail = json.loads((folder / f"decision-{index}.json").read_text(encoding="utf-8"))
             orders = [order for order in progress["orders"] if order.get("decision_index") == index]
         detail["orders"] = orders
+        detail["skeptic_enabled"] = request.get("skeptic_enabled", True)
         detail["fills"] = [
             dict(order_id=order["id"], side=order["side"], qty=order["filled_qty"],
-                 price=order["fill_price"], t=order["filled_at"])
-            for order in orders if order.get("status") == "filled"
+                 price=order["fill_price"], t=order["filled_at"],
+                 **({"position_effect": order["position_effect"]} if order.get("position_effect") else {}))
+            for order in orders if order.get("filled_qty", 0) > 0
         ]
         return detail
 
+    def run_worker(mode, folder, timeout):
+        if mode in workers:
+            workers[mode].run(folder, timeout)
+            return
+        with (folder / "worker.log").open("w", encoding="utf-8") as log:
+            subprocess.run([sys.executable, "-m", f"trader.backtest.{mode}", str(folder)],
+                           stdout=log, stderr=log, timeout=timeout, check=True)
+
     def simulate(run_id, request, folder):
         try:
-            with (folder / "worker.log").open("w", encoding="utf-8") as log:
-                subprocess.run(
-                    [sys.executable, "-m", "trader.backtest.simulation", str(folder)],
-                    stdout=log, stderr=log, timeout=1500, check=True,
-                )
+            run_worker("simulation", folder, max(1500, 108 * request["duration_minutes"] + 120))
         except (OSError, subprocess.SubprocessError) as exc:
             progress = simulation_status(run_id, request, folder)
             message = "Simulation reached its time limit." if isinstance(exc, subprocess.TimeoutExpired) else (
@@ -167,7 +210,10 @@ def make_server(
             if (log_file := folder / "worker.log").is_file():
                 print(log_file.read_text(encoding="utf-8", errors="replace")[-8000:], file=sys.stderr, flush=True)
         finally:
-            scenario_slot.release()
+            with simulations_lock:
+                simulation_slot.release()
+                running_simulations.discard(run_id)
+                projection_wake.set()
 
     catalog = json.dumps(
         {
@@ -186,6 +232,100 @@ def make_server(
 
     star_url = os.environ.get("TRADER_VIEWER_DATABASE_URL")
     star = StarJournal(star_url)
+    projection_stop = Event()
+    projection_wake = Event()
+    unprojected_cycles = set(cycles)
+
+    def replay_audit(run_id):
+        cycle, entry = cycles[run_id], journal.get(run_id, {})
+        order_ids = [order["id"] for order in cycle["orders"]]
+        return {
+            "as_of": cycle["as_of"], "elapsed_s": cycle["elapsed_s"], "outcome": cycle["outcome"],
+            "evidence": entry.get("evidence", {}).get("content", {}),
+            "result": entry.get("result") or cycle.get("result", {}),
+            "attempts": entry.get("attempts", []), "risk": cycle["risk"],
+            "orders": [orders[order_id] for order_id in order_ids],
+            "fills": [fill for order_id in order_ids for fill in fills_by_order.get(order_id, [])],
+        }
+
+    def projection_inputs(checkpoint):
+        with pending_lock:
+            pending = list(pending_audits.items())
+        for identifier, (detail, dimensions) in pending:
+            yield identifier, lambda detail=detail: detail, dimensions
+        with history_lock:
+            analysis_runs = list(unprojected_history.values())
+        for summary, path in analysis_runs:
+            yield summary["id"], lambda path=path: json.loads(path.read_text(encoding="utf-8")), {
+                "symbol": summary["symbol"], "portfolio": "analysis", "strategy": "interactive-council", "company": summary["company"],
+            }
+        with simulations_lock:
+            simulation_runs = list(simulations.items())
+        for run_id, (request, folder) in simulation_runs:
+            if run_id in projected_simulations:
+                continue
+            progress = simulation_status(run_id, request, folder)
+            indexes = [row["index"] for row in progress.get("decisions", [])]
+            if end_window_orders(progress):
+                indexes.append("cutoff")
+            pending_indexes = [index for index in indexes if f"simulation:{run_id}:{index}" not in checkpoint]
+            if not pending_indexes and progress["status"] not in ("queued", "loading", "running", "waiting_for_quota"):
+                projected_simulations.add(run_id)
+            for index in pending_indexes:
+                yield f"simulation:{run_id}:{index}", lambda run_id=run_id, request=request, folder=folder, index=index, progress=progress: (
+                    simulation_audit(run_id, request, folder, index, progress)
+                ), {"symbol": request["symbol"], "portfolio": "simulation", "strategy": "intraday-council"}
+        for run_id in unprojected_cycles:
+            yield f"replay:{run_id}", lambda run_id=run_id: replay_audit(run_id), {
+                "symbol": manifest["symbol"], "portfolio": "simulation",
+                "strategy": journal.get(run_id, {}).get("variant") or "saved-replay",
+            }
+
+    def project_in_background():
+        retry_at = {}
+        checkpoint = None
+        while not projection_stop.is_set():
+            batch = []
+            try:
+                if checkpoint is None:
+                    checkpoint = star.projected_ids()
+                    with history_lock:
+                        unprojected_history.clear()
+                        unprojected_history.update(
+                            (identifier, (summary, path)) for identifier, (_, summary, path) in history.items()
+                            if identifier not in checkpoint
+                        )
+                    unprojected_cycles.clear()
+                    unprojected_cycles.update(run_id for run_id in cycles if f"replay:{run_id}" not in checkpoint)
+                now = monotonic()
+                batch = list(islice((
+                    job for job in projection_inputs(checkpoint)
+                    if job[0] not in checkpoint and retry_at.get(job[0], 0) <= now
+                ), 32))
+                for identifier, load, dimensions in batch:
+                    if projection_stop.is_set():
+                        return
+                    if identifier in checkpoint:
+                        continue
+                    try:
+                        star.project(identifier, load(), **dimensions)
+                        checkpoint.add(identifier)
+                        with pending_lock:
+                            pending_audits.pop(identifier, None)
+                        with history_lock:
+                            unprojected_history.pop(identifier, None)
+                        if identifier.startswith("replay:"):
+                            unprojected_cycles.discard(identifier.removeprefix("replay:"))
+                        retry_at.pop(identifier, None)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        # A missing snapshot is retried after its writer publishes it.
+                        retry_at[identifier] = monotonic() + 15
+            except (OSError, ValueError, SQLAlchemyError):
+                checkpoint = None
+                projected_simulations.clear()
+                batch = []  # The durable facts remain the checkpoint after database recovery.
+            projection_wake.wait(0.2 if len(batch) == 32 else 2)
+            projection_wake.clear()
 
     class Handler(BaseHTTPRequestHandler):
         def check_host(self):
@@ -210,15 +350,26 @@ def make_server(
 
         def send_audit(self, decision_id, load_detail, *, symbol, portfolio, strategy, company=None, saved_source=None):
             try:
-                detail = star.get(decision_id)
-                if detail is None:
-                    detail = star.project(decision_id, load_detail(), symbol=symbol, portfolio=portfolio,
-                                          strategy=strategy, company=company)
+                with pending_lock:
+                    pending = pending_audits.get(decision_id)
+                if pending:
+                    detail = preview_audit(decision_id, pending[0], **pending[1])
+                else:
+                    try:
+                        detail = star.get(decision_id)
+                    except SQLAlchemyError:
+                        detail = None
+                    if detail is None:
+                        source = load_detail()
+                        dimensions = dict(symbol=symbol, portfolio=portfolio, strategy=strategy, company=company)
+                        detail = preview_audit(decision_id, source, **dimensions)
+                        with pending_lock:
+                            pending_audits[decision_id] = (source, dimensions)
+                            if len(pending_audits) > 32:
+                                pending_audits.pop(next(iter(pending_audits)))
+                        projection_wake.set()
             except (OSError, ValueError, KeyError):
                 self.send_json({"error": "The recorded decision could not be read."}, 404)
-                return
-            except SQLAlchemyError:
-                self.send_json({"error": "The audit database is unavailable. Try again when it recovers."}, 503)
                 return
             if saved_source:
                 detail = {
@@ -231,9 +382,24 @@ def make_server(
             if not self.check_host():
                 return
 
-            path = urlsplit(self.path).path
+            url = urlsplit(self.path)
+            path = url.path
             content_type = "application/json; charset=utf-8"
-            if path in STATIC:
+            if path == "/health/live":
+                self.send_json({"status": "alive"})
+                return
+            elif path == "/health/ready":
+                try:
+                    star.ready()
+                except SQLAlchemyError:
+                    self.send_json({"status": "unready", "dependency": "audit_database"}, 503)
+                    return
+                self.send_json({"status": "ready"})
+                return
+            elif path == "/api/audits" or path.startswith("/api/audits/"):
+                self.send_audit_query(path, url.query)
+                return
+            elif path in STATIC:
                 asset, content_type = STATIC[path]
                 body = (ASSETS / asset).read_bytes()
             elif path == "/api/replay":
@@ -249,7 +415,7 @@ def make_server(
                 summary = (simulation_status(run_id, *saved) for run_id, saved in reversed(runs))
                 self.send_json({"runs": [
                     {**{key: detail[key] for key in ("id", "status", "request")},
-                     "filled_orders": sum(order.get("status") == "filled" for order in detail["orders"])}
+                     "filled_orders": sum(order.get("filled_qty", 0) > 0 for order in detail["orders"])}
                     for detail in summary
                 ]})
                 return
@@ -263,6 +429,13 @@ def make_server(
                     return
                 if len(parts) == 1:
                     self.send_json(simulation_status(run_id, *saved))
+                    return
+                if parts[1:] == ["payoff-samples", "download"]:
+                    path = saved[1] / "payoff-samples.jsonl"
+                    if not path.is_file():
+                        self.send_error(404)
+                    else:
+                        self.send_data(path.read_bytes(), "application/x-ndjson; charset=utf-8")
                     return
                 index = parts[2]
                 if parts[1] != "decisions" or (index != "cutoff" and (
@@ -294,19 +467,10 @@ def make_server(
                     self.send_json({"error": str(exc)}, 502)
                 return
             elif path.startswith("/api/cycle/") and (run_id := path.removeprefix("/api/cycle/")) in cycles:
-                cycle = cycles[run_id]
                 entry = journal.get(run_id, {})
-                order_ids = [order["id"] for order in cycle["orders"]]
                 self.send_audit(
-                    f"replay:{run_id}", lambda: {
-                        "as_of": cycle["as_of"], "elapsed_s": cycle["elapsed_s"], "outcome": cycle["outcome"],
-                        "evidence": entry.get("evidence", {}).get("content", {}),
-                        "result": entry.get("result") or cycle.get("result", {}),
-                        "attempts": entry.get("attempts", []),
-                        "risk": cycle["risk"],
-                        "orders": [orders[order_id] for order_id in order_ids],
-                        "fills": [fill for order_id in order_ids for fill in fills_by_order.get(order_id, [])],
-                    }, symbol=manifest["symbol"], portfolio="simulation", strategy=entry.get("variant") or "saved-replay",
+                    f"replay:{run_id}", lambda: replay_audit(run_id), symbol=manifest["symbol"],
+                    portfolio="simulation", strategy=entry.get("variant") or "saved-replay",
                 )
                 return
             else:
@@ -314,6 +478,26 @@ def make_server(
                 return
 
             self.send_data(body, content_type)
+
+        def send_audit_query(self, path, query):
+            try:
+                if path == "/api/audits":
+                    args = parse_qs(query, max_num_fields=6)
+                    filters = {key: args[key][0] for key in ("day", "instrument", "strategy", "role", "before") if key in args}
+                    if any(len(value) > 300 for value in filters.values()):
+                        raise ValueError("Audit filter too long")
+                    self.send_json(star.list_decisions(**filters))
+                    return
+                identifier = unquote(path.removeprefix("/api/audits/"))
+                row = star.get(identifier) if len(identifier) <= 256 else None
+                if row is None:
+                    self.send_json({"error": "No matching audit."}, 404)
+                else:
+                    self.send_json({key: row[key] for key in ("as_of", "result", "attempts", "fills", "star") if key in row})
+            except ValueError:
+                self.send_json({"error": "Invalid audit filter or cursor."}, 400)
+            except SQLAlchemyError:
+                self.send_json({"error": "The audit database is unavailable."}, 503)
 
         def do_POST(self):
             if not self.check_host():
@@ -340,8 +524,9 @@ def make_server(
             except ValueError:
                 self.send_json({"error": "Invalid analysis request."}, 400)
                 return
-            if not scenario_slot.acquire(blocking=False):
-                self.send_json({"error": "A council run is already in progress. Wait for it to finish."}, 409)
+            slot = simulation_slot if is_simulation else scenario_slot
+            if not slot.acquire(blocking=False):
+                self.send_json({"error": "A run of this type is already in progress."}, 409)
                 return
             if is_simulation:
                 run_id = uuid4().hex
@@ -352,11 +537,13 @@ def make_server(
                     request = scenario.model_dump(mode="json")
                     with simulations_lock:
                         simulations[run_id] = (request, folder)
+                        running_simulations.add(run_id)
                     Thread(target=simulate, args=(run_id, request, folder), daemon=True).start()
                 except (OSError, RuntimeError):
                     with simulations_lock:
                         simulations.pop(run_id, None)
-                    scenario_slot.release()
+                        running_simulations.discard(run_id)
+                    slot.release()
                     self.send_json({"error": "The simulation worker could not start."}, 502)
                     return
                 self.send_json({"id": run_id}, 202)
@@ -365,20 +552,14 @@ def make_server(
                 folder = (analysis_root / uuid4().hex).resolve()
                 folder.mkdir(parents=True)
                 (folder / "request.json").write_text(scenario.model_dump_json(), encoding="utf-8")
-                with (folder / "worker.log").open("w", encoding="utf-8") as log:
-                    subprocess.run(
-                        [sys.executable, "-m", "trader.backtest.decision", str(folder)],
-                        stdout=log,
-                        stderr=log,
-                        timeout=250,
-                        check=True,
-                    )
+                run_worker("decision", folder, 250)
                 response_path = folder / "response.json"
                 response = json.loads(response_path.read_text(encoding="utf-8"))
                 if "error" in response:
                     self.send_json(response, 422)
                 else:
                     remember(response_path, response, "analysis")
+                    projection_wake.set()
                     if "as_of" in response:
                         self.send_audit(f"analysis-{folder.name}", lambda: response, symbol=scenario.symbol,
                                         portfolio="analysis", strategy="interactive-council", company=response.get("company"))
@@ -393,8 +574,21 @@ def make_server(
                 scenario_slot.release()
 
     class ViewerServer(ThreadingHTTPServer):
+        def serve_forever(self, poll_interval=0.5):
+            for worker in workers.values():
+                worker.start()
+            self.projector = Thread(target=project_in_background, daemon=True, name="audit-projector")
+            self.projector.start()
+            return super().serve_forever(poll_interval)
+
         def server_close(self):
+            for worker in workers.values():
+                worker.close()
             super().server_close()
+            projection_stop.set()
+            projection_wake.set()
+            if getattr(self, "projector", None):
+                self.projector.join(timeout=4)
             try:
                 star.close(clear=bool(star_url))
             except SQLAlchemyError:

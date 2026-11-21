@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 import httpx
 import pandas as pd
 from msgpack import Timestamp
-from sqlalchemy import select
+from sqlalchemy import String, case, column, func, select, values
+from sqlalchemy.orm import aliased
 
 from trader.events.envelope import utcnow
 from trader.features.functions import digest
@@ -40,16 +41,17 @@ def identity(value):
 
 
 class TickArchive:
-    def __init__(self, store, feed):
+    def __init__(self, store, feed, *, event_identity=identity, publish_bars=True):
         self.store, self.feed = store, feed
         self.fs = FeatureStore(store)
+        self.event_identity, self.publish_bars = event_identity, publish_bars
 
     def append(self, events, origin, observed_at):
         rows = []
         for event in events:
             kind, symbol = event.get("T"), event.get("S")
             if (
-                kind not in ("q", "t", "c", "x", "b", "u")
+                kind not in ("q", "t", "c", "x", "b", "u", "s")
                 or not isinstance(symbol, str)
                 or not symbol
                 or len(symbol) > 32
@@ -60,7 +62,7 @@ class TickArchive:
             payload["t"] = pd.Timestamp(ns, tz="UTC").isoformat()
             rows.append(
                 dict(
-                    event_key=digest([self.feed, symbol, kind, identity(payload)]),
+                    event_key=digest([self.feed, symbol, kind, self.event_identity(payload)]),
                     feed=self.feed,
                     symbol=symbol,
                     kind=kind,
@@ -71,24 +73,39 @@ class TickArchive:
                 )
             )
         with self.store.session() as session:
-            many(session, MarketTick, rows)
-            from trader.features.stream_input import ingest_completed_bars
+            if self.publish_bars:
+                from trader.features.stream_input import ingest_completed_bars
 
-            ingest_completed_bars(self.fs, self.feed, rows, observed_at)
+                candles = [row for row in rows if row["kind"] in ("b", "u")]
+                many(session, MarketTick, [row for row in rows if row["kind"] not in ("b", "u")])
+                inserted = set(many(session, MarketTick, candles, returning=MarketTick.event_key))
+                revisions = []
+                for row in candles:
+                    if row["event_key"] in inserted:
+                        inserted.remove(row["event_key"])
+                        revisions.append(row)
+                ingest_completed_bars(self.fs, self.feed, revisions, observed_at, live=origin == "stream")
+            else:
+                many(session, MarketTick, rows)
         return len(rows)
 
     def events(self, symbol, kind, start, end, as_of=None):
+        return list(self.iter_events(symbol, kind, start, end, as_of=as_of))
+
+    def iter_events(self, symbol, kind, start, end, as_of=None, *, include_end=False):
         with self.store.session() as session:
             query = select(MarketTick).where(
                 MarketTick.feed == self.feed,
                 MarketTick.symbol == symbol,
                 MarketTick.kind == kind,
                 MarketTick.event_time_ns >= event_ns(start),
-                MarketTick.event_time_ns < event_ns(end),
+                MarketTick.event_time_ns < event_ns(end) + int(include_end),
             )
             if as_of is not None:
                 query = query.where(MarketTick.known_at <= as_of)
-            return session.scalars(query.order_by(MarketTick.event_time_ns, MarketTick.event_key)).all()
+            yield from session.scalars(query.order_by(
+                MarketTick.event_time_ns, MarketTick.event_key,
+            ).execution_options(yield_per=5000))
 
     def latest_stream_quote(self, symbol, start, as_of):
         """Index-backed as-of lookup of the last observed book update."""
@@ -105,6 +122,30 @@ class TickArchive:
                 ).order_by(MarketTick.event_time_ns.desc(), MarketTick.known_at.desc(), MarketTick.event_key.desc())
                 .limit(1)
             )
+
+    def latest_stream_quotes(self, symbols, start, as_of):
+        if not symbols:
+            return []
+        requested = values(column("symbol", String)).data([(s,) for s in symbols]).cte("requested_symbols")
+        tick = aliased(MarketTick)
+
+        def numeric(key):
+            if self.store.engine.dialect.name == "postgresql":
+                valid = func.jsonb_typeof(tick.payload[key]) == "number"
+            else:
+                valid = func.json_type(tick.payload, f"$.{key}").in_(("integer", "real"))
+            return case((valid, tick.payload[key].as_float()))
+
+        bid, ask = numeric("bp"), numeric("ap")
+        newest = select(tick.event_key).where(
+            tick.feed == self.feed, tick.symbol == requested.c.symbol, tick.kind == "q", tick.origin == "stream",
+            tick.event_time_ns >= event_ns(start), tick.event_time_ns <= event_ns(as_of), tick.known_at <= as_of,
+            bid > 0, ask >= bid,
+        ).order_by(tick.event_time_ns.desc(), tick.known_at.desc(), tick.event_key.desc()).limit(1)
+        with self.store.session() as db:
+            return db.scalars(select(MarketTick).select_from(requested).join(
+                MarketTick, MarketTick.event_key == newest.correlate(requested).scalar_subquery(),
+            )).all()
 
     def key(self, symbol, kind):
         return f"tick:{self.feed}:{symbol}:{kind}"

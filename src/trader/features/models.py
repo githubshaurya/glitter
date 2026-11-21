@@ -22,7 +22,10 @@ class MarketTick(Base):
 
 class MarketBar(Base):
     __tablename__ = "market_bar_history"
-    __table_args__ = (Index("ix_bars_asof", "symbol", "timeframe", "event_time", "known_at"),)
+    __table_args__ = (
+        Index("ix_bars_asof", "symbol", "timeframe", "event_time", "known_at"),
+        Index("ix_bars_feed_asof", "feed", "symbol", "timeframe", "event_time", "known_at"),
+    )
     record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     timeframe: Mapped[str] = mapped_column(String(8))
@@ -30,17 +33,40 @@ class MarketBar(Base):
     event_time: Mapped[datetime] = mapped_column(TS, index=True)
     known_at: Mapped[datetime] = mapped_column(TS, index=True)
     content_hash: Mapped[str] = mapped_column(String(64))
+    revision_rank: Mapped[int] = mapped_column(Integer, default=1)
+    source_event_id: Mapped[str | None] = mapped_column(String(64))
     value: Mapped[dict[str, Any]] = mapped_column(JSONType)
 
 
 class Coverage(Base):
     __tablename__ = "bar_coverage_history"
-    __table_args__ = (Index("ix_coverage_asof", "symbol", "event_time", "known_at"),)
+    __table_args__ = (
+        Index("ix_coverage_asof", "symbol", "event_time", "known_at"),
+        Index("ix_coverage_feed_asof", "feed", "symbol", "event_time", "known_at"),
+    )
     record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
+    feed: Mapped[str] = mapped_column(String(16), default="iex")
     event_time: Mapped[datetime] = mapped_column(TS, index=True)
     known_at: Mapped[datetime] = mapped_column(TS, index=True)
     status: Mapped[str] = mapped_column(String(24))
+
+
+class CandleDayRevision(Base):
+    __tablename__ = "candle_day_revisions"
+    feed: Mapped[str] = mapped_column(String(16), primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger)
+    newest_known_at: Mapped[datetime] = mapped_column(TS)
+
+
+class CandleProgress(Base):
+    __tablename__ = "candle_progress"
+    feed: Mapped[str] = mapped_column(String(16), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger)
+    dirty_from: Mapped[datetime | None] = mapped_column(TS)
+    newest_known_at: Mapped[datetime] = mapped_column(TS)
 
 
 class Gap(Base):
@@ -69,6 +95,7 @@ class Article(Base):
     provider_id: Mapped[str] = mapped_column(String(128))
     provider: Mapped[str] = mapped_column(String(64))
     published_at: Mapped[datetime] = mapped_column(TS)
+    revision_at: Mapped[datetime | None] = mapped_column(TS)
     known_at: Mapped[datetime] = mapped_column(TS, index=True)
     headline: Mapped[str] = mapped_column(Text)
     summary: Mapped[str] = mapped_column(Text)

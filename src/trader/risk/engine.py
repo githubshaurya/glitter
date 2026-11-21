@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from trader.events.payloads import CheckResultPayload
 from trader.risk.checks import ALL_CHECKS, TRIP_CHECKS, RiskContext
+from trader.risk.entry_price import entry_price_check
 
 
 @dataclass
@@ -23,6 +24,11 @@ def evaluate(ctx: RiskContext) -> Verdict:
             results.append(check(ctx))
         except Exception as exc:  # a check that blows up is a failed check (fail closed)
             results.append(CheckResultPayload(name=check.__name__, passed=False, observed="check error", limit="", detail=repr(exc)[:300]))
+    proposal = ctx.proposal
+    if proposal.side == "buy" and proposal.analysis_entry_price is not None:
+        results.append(entry_price_check(
+            proposal.side, proposal.analysis_entry_price, proposal.limit_price, ctx.quote, ctx.limits.max_limit_deviation_bps,
+        ))
     failed = [r for r in results if not r.passed]
     trip = next((TRIP_CHECKS[r.name] for r in failed if r.name in TRIP_CHECKS), None)
     if not failed:

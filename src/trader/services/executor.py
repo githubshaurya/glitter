@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from threading import Event, Thread
 
 import structlog
@@ -18,10 +19,12 @@ import structlog
 from trader.alerts import alert
 from trader.broker.base import Broker, BrokerError, DuplicateOrderError
 from trader.config import PAPER_TRADING_HOST
+from trader.deadline import Deadline, request_budget
 from trader.events import topics
-from trader.events.envelope import Envelope
+from trader.events.envelope import Envelope, utcnow
 from trader.events.payloads import OrderCommandPayload, OrderUpdatePayload, SubmissionPayload
 from trader.kafka.consumer import BaseConsumer
+from trader.risk.entry_price import entry_price_check, quote_seconds_remaining
 from trader.risk.signing import verify as verify_command
 from trader.services.common import ServiceContext, build_context, make_broker
 
@@ -100,15 +103,36 @@ class Executor:
             self._publish(cmd, env, "blocked", error="kill switch active")
             return
 
+        send_budget: AbstractContextManager[object] = nullcontext()
+        if cmd.side == "buy" and cmd.analysis_entry_price is not None:
+            if cmd.valid_until is None or utcnow() >= cmd.valid_until:
+                self._publish(cmd, env, "expired", error="analysis authorization expired before send")
+                return
+            try:
+                with request_budget(Deadline((cmd.valid_until - utcnow()).total_seconds())):
+                    quote = self.broker.latest_quotes([cmd.symbol]).get(cmd.symbol)
+            except (BrokerError, OSError, TimeoutError):
+                self._publish(cmd, env, "blocked", error="entry quote unavailable before send")
+                return
+            now = utcnow()
+            risk = self.ctx.cfg.risk
+            check = entry_price_check(cmd.side, cmd.analysis_entry_price, cmd.limit_price, quote, risk.max_limit_deviation_bps)
+            remaining = min((cmd.valid_until - now).total_seconds(), quote_seconds_remaining(quote, now, risk.max_quote_age_seconds))
+            if not check.passed or remaining <= 0 or self.ctx.store.is_halted():
+                error = f"entry_price_current: {check.observed}" if not check.passed else "entry quote or authorization expired, or execution halted"
+                self._publish(cmd, env, "blocked", error=error)
+                return
+            send_budget = request_budget(Deadline(remaining))
         try:
-            res = self.broker.submit_limit_order(
-                client_order_id=cmd.client_order_id,
-                symbol=cmd.symbol,
-                side=cmd.side,
-                qty=cmd.qty,
-                limit_price=cmd.limit_price,
-                time_in_force=cmd.time_in_force,
-            )
+            with send_budget:
+                res = self.broker.submit_limit_order(
+                    client_order_id=cmd.client_order_id,
+                    symbol=cmd.symbol,
+                    side=cmd.side,
+                    qty=cmd.qty,
+                    limit_price=cmd.limit_price,
+                    time_in_force=cmd.time_in_force,
+                )
             status, alpaca_id = "submitted", res.alpaca_order_id
         except DuplicateOrderError:
             existing = self.broker.get_order_by_client_id(cmd.client_order_id)
@@ -141,7 +165,8 @@ class Executor:
 
     def _reconcile_bracket_update(self, env: Envelope) -> None:
         from trader.risk.durable import enabled, reconcile_one
-        from trader.store.extended import Reservation
+        from trader.store.extended import ManagedBracket, Reservation
+        from trader.store.repo import aware
 
         if not enabled(self.ctx) or self.broker.host != PAPER_TRADING_HOST:
             return
@@ -156,8 +181,16 @@ class Executor:
                 or item.lane != self.lane
                 or item.state not in ("OPEN", "UNKNOWN", "SUBMITTING")
                 or not item.command["payload"].get("protection")
+                or (item.symbol, item.side, float(item.qty)) != (update.symbol, update.side, update.qty)
             ):
                 return
+            ref = item.account_ref
+        with self.ctx.store.account_transaction(ref) as session:
+            lot = session.get(ManagedBracket, client_id)
+            if lot is not None and (
+                lot.partial_observed_at is None or env.occurred_at < aware(lot.partial_observed_at)
+            ):
+                lot.partial_observed_at = env.occurred_at
         reconcile_one(self.ctx, client_id)
 
     def manage_positions(self) -> None:
@@ -256,19 +289,11 @@ class Executor:
 
 
 def run(ctx: ServiceContext) -> None:
+    from dataclasses import replace
+
+    from trader.store.dispatch import enabled, run_dispatch
+
     ex = Executor(ctx)
-    consumer = BaseConsumer(
-        bootstrap_servers=ctx.settings.kafka_bootstrap,
-        group_id=f"executor-{ctx.lane}",
-        topics_=[topics.commands_topic(ctx.lane), topics.ORDER_EVENTS],
-        handler=ex.handle,
-        service=ctx.service,
-        publisher=ctx.publisher,
-        on_expired=ex.on_expired,
-        dedupe=ctx.store,
-        on_idle=ex.housekeeping,
-        idle_interval_seconds=30,
-    )
     ctx.beat(state="started")
     stop = Event()
     if ctx.cfg.durable_risk.enabled and ctx.settings.execution_enabled:
@@ -276,11 +301,35 @@ def run(ctx: ServiceContext) -> None:
 
         # Separate HTTP connection: Kafka stalls and the command loop cannot starve risk-reducing exits.
         Thread(
-            target=run_loop, args=(ctx, make_broker(ctx.settings, ctx.cfg, ctx.lane), stop),
+            target=run_loop, args=(ctx, make_broker(ctx.settings, ctx.cfg, ctx.lane, rate_limit_per_minute=80), stop),
             name="managed-exits", daemon=True,
         ).start()
     try:
-        consumer.run()
+        if enabled(ctx):
+            recovery = Executor(replace(
+                ctx, broker=make_broker(ctx.settings, ctx.cfg, ctx.lane, rate_limit_per_minute=20),
+            ))
+
+            def reconcile():
+                while not stop.is_set():
+                    recovery.housekeeping()
+                    stop.wait(5)
+
+            Thread(target=reconcile, name="order-recovery", daemon=True).start()
+            run_dispatch(ctx, "executor", ("command", "order_update"), ex.handle, ex.on_expired, stop)
+        else:
+            BaseConsumer(
+                bootstrap_servers=ctx.settings.kafka_bootstrap,
+                group_id=f"executor-{ctx.lane}",
+                topics_=[topics.commands_topic(ctx.lane), topics.ORDER_EVENTS],
+                handler=ex.handle,
+                service=ctx.service,
+                publisher=ctx.publisher,
+                on_expired=ex.on_expired,
+                dedupe=ctx.store,
+                on_idle=ex.housekeeping,
+                idle_interval_seconds=30,
+            ).run()
     finally:
         stop.set()
 
@@ -289,7 +338,7 @@ def main() -> None:
     from trader.config import get_settings
 
     lane = get_settings().lane
-    run(build_context(f"executor-{lane}", lane=lane))
+    run(build_context(f"executor-{lane}", lane=lane, broker_rate_limit=50))
 
 
 if __name__ == "__main__":

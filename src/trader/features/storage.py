@@ -1,14 +1,19 @@
 """Append-only observations and immutable evidence. PostgreSQL is authoritative."""
 
+import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import case, func, or_, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from trader.features.functions import canonical, digest
 from trader.features.models import (
     Article,
+    CandleDayRevision,
+    CandleProgress,
     Coverage,
     Evidence,
     FeatureLatest,
@@ -21,8 +26,12 @@ from trader.features.models import (
 )
 from trader.features.registry import REGISTRY
 from trader.store.extended import Blob
-from trader.store.insert import once
+from trader.store.insert import many, once
 from trader.store.repo import aware
+
+
+def bar_gap_scope(feed, symbol):
+    return "bar:" + digest([feed, symbol])[:24]
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,85 @@ class FeatureStore:
                 s.merge(FeatureLatest(key=latest_key, rec_hash=key))
         return key
 
+    def write_observations(self, observations, known_at):
+        """Publish a worker's derived observations in bounded groups inside its transaction."""
+        committed = {}
+        names = {name for _, _, name, *_ in observations}
+        versions = {name: REGISTRY[name].feature_version for name in names}
+        size = 100 if self.store.engine.dialect.name == "sqlite" else 500
+        fields = ("entity_type", "entity_id", "name", "version", "event_time")
+        identity_columns = tuple_(*(getattr(FeatureValue, name) for name in fields))
+        for offset in range(0, len(observations), size):
+            group = observations[offset : offset + size]
+            records = {}
+            for entity_type, entity_id, name, value, event_time, quality, status in group:
+                definition = REGISTRY[name]
+                if definition.entity_type != entity_type:
+                    raise ValueError("feature entity type does not match registry")
+                identity = (entity_type, entity_id, name, versions[name], event_time)
+                records[identity] = dict(zip(fields, identity, strict=True), value=value, quality=quality or {},
+                                         base_status=status)
+            if len(records) != len(group):
+                for kind, entity, name, value, event, quality, status in group:
+                    committed[kind, entity, name, event] = self.write(
+                        kind, entity, name, value, event, known_at, quality, status,
+                    )
+                continue
+            with self.store.session() as session:
+                observations_by_time = session.scalars(select(FeatureValue).where(
+                    identity_columns.in_(records.keys()), FeatureValue.known_at <= known_at,
+                ).order_by(FeatureValue.known_at.desc())).all()
+                previous = {}
+                for row in observations_by_time:
+                    identity = (row.entity_type, row.entity_id, row.name, row.version, aware(row.event_time))
+                    previous.setdefault(identity, row)
+                candidates = {}
+                for identity, record in records.items():
+                    old = previous.get(identity)
+                    body = canonical(record)
+                    key = hashlib.sha256(body.encode()).hexdigest()
+                    if old is not None:
+                        old_record = {field: getattr(old, field) for field in record}
+                        old_record["event_time"] = aware(old.event_time)
+                        old_body = canonical(old_record)
+                        if old_body == body or json.loads(old_body) == json.loads(body):
+                            committed[(*identity[:3], identity[4])] = old.rec_hash
+                            continue
+                    candidates[key] = (identity, record, body)
+                if not candidates:
+                    continue
+                existing = set(session.scalars(select(FeatureValue.rec_hash).where(
+                    FeatureValue.rec_hash.in_(candidates.keys()),
+                )))
+                writes, pointers = [], {}
+                for key, (identity, record, body) in candidates.items():
+                    if key in existing:
+                        key = digest([record, known_at])
+                    data = json.loads(body)
+                    event_time = record["event_time"]
+                    writes.append(dict(data, rec_hash=key, event_time=event_time, known_at=known_at))
+                    committed[(*identity[:3], event_time)] = key
+                    pointer = ":".join(identity[:4])
+                    if pointer not in pointers or pointers[pointer][0] <= event_time:
+                        pointers[pointer] = (event_time, key)
+                many(session, FeatureValue, writes)
+                current = dict((row.key, (aware(row.event_time), aware(row.known_at))) for row in session.execute(
+                    select(FeatureLatest.key, FeatureValue.event_time, FeatureValue.known_at)
+                    .join(FeatureValue, FeatureValue.rec_hash == FeatureLatest.rec_hash)
+                    .where(FeatureLatest.key.in_(pointers.keys()))
+                ))
+                updates = [
+                    dict(key=pointer, rec_hash=key) for pointer, (at, key) in sorted(pointers.items())
+                    if pointer not in current or current[pointer] <= (at, known_at)
+                ]
+                if updates:
+                    insert = sqlite_insert if session.bind.dialect.name == "sqlite" else pg_insert
+                    stmt = insert(FeatureLatest)
+                    session.execute(stmt.on_conflict_do_update(
+                        index_elements=[FeatureLatest.key], set_={"rec_hash": stmt.excluded.rec_hash},
+                    ), updates)
+        return committed
+
     def open_gap(self, scope, start, end, detected_at):
         key = digest([scope, start, end])
         with self.store.session() as s:
@@ -117,7 +205,10 @@ class FeatureStore:
             if gap and gap.healed_at is None:
                 gap.status, gap.healed_at = "HEALED", at
 
-    def ingest_minutes(self, symbols, start, end, response, known_at, successful=True, feed="iex"):
+    def ingest_minutes(
+        self, symbols, start, end, response, known_at, successful=True, feed="iex", *,
+        revision_rank=1, source_event_id=None,
+    ):
         minutes = []
         cursor = start
         while cursor < end:
@@ -128,26 +219,29 @@ class FeatureStore:
             old_coverage = s.scalars(
                 select(Coverage)
                 .where(
+                    Coverage.feed == feed,
                     Coverage.symbol.in_(symbols),
                     Coverage.event_time >= start,
                     Coverage.event_time < end,
                     Coverage.known_at <= known_at,
                 )
-                .order_by(Coverage.known_at)
+                .order_by(Coverage.status == "VERIFIED_BAR", Coverage.status == "VERIFIED_NONE",
+                          Coverage.known_at, Coverage.record_id)
             ).all()
             latest_coverage = {(r.symbol, aware(r.event_time)): r.status for r in old_coverage}
             old_bars = s.scalars(
                 select(MarketBar)
                 .where(
+                    MarketBar.feed == feed,
                     MarketBar.symbol.in_(symbols),
                     MarketBar.timeframe == "1m",
                     MarketBar.event_time >= start,
                     MarketBar.event_time < end,
                     MarketBar.known_at <= known_at,
                 )
-                .order_by(MarketBar.known_at)
+                .order_by(MarketBar.revision_rank, MarketBar.known_at, MarketBar.record_id)
             ).all()
-            latest_bars = {(r.symbol, aware(r.event_time)): r.content_hash for r in old_bars}
+            latest_bars = {(r.symbol, aware(r.event_time)): r for r in old_bars}
             coverage_rows = []
             bar_rows = []
             for symbol in symbols:
@@ -160,21 +254,27 @@ class FeatureStore:
                         else ("VERIFIED_NONE" if successful and canary else "UNVERIFIED")
                     )
                     previous_status = latest_coverage.get((symbol, minute))
+                    previous_bar = latest_bars.get((symbol, minute))
+                    if status != "VERIFIED_BAR" and previous_bar is not None:
+                        status = "VERIFIED_BAR"
                     if status == "UNVERIFIED" and previous_status in ("VERIFIED_BAR", "VERIFIED_NONE"):
                         # A failed observation says nothing about bars already recorded.
                         continue
-                    key = digest([symbol, minute, known_at, status])
+                    key = digest([feed, symbol, minute, known_at, status])
                     if previous_status != status:
                         coverage_rows.append(
-                            dict(record_id=key, symbol=symbol, event_time=minute, known_at=known_at, status=status)
+                            dict(record_id=key, symbol=symbol, feed=feed, event_time=minute, known_at=known_at, status=status)
                         )
                     if successful and bar:
                         value = bar.model_dump(mode="json")
                         content_hash = digest(value)
-                        if latest_bars.get((symbol, minute)) != content_hash:
+                        if previous_bar is None or (
+                            revision_rank > 0 and revision_rank >= previous_bar.revision_rank
+                            and (previous_bar.content_hash != content_hash or revision_rank > previous_bar.revision_rank)
+                        ):
                             bar_rows.append(
                                 dict(
-                                    record_id=digest([symbol, minute, content_hash, known_at]),
+                                    record_id=digest([feed, symbol, minute, content_hash, known_at, revision_rank]),
                                     symbol=symbol,
                                     timeframe="1m",
                                     feed=feed,
@@ -182,24 +282,65 @@ class FeatureStore:
                                     known_at=known_at,
                                     value=value,
                                     content_hash=content_hash,
+                                    revision_rank=revision_rank,
+                                    source_event_id=source_event_id,
                                 )
                             )
-            from trader.store.insert import many
-
             many(s, Coverage, coverage_rows)
             many(s, MarketBar, bar_rows)
+            # A single generation increment covers all symbols changed on this feed/day in the transaction.
+            days = sorted({row["event_time"].astimezone(UTC).date().isoformat() for row in (*coverage_rows, *bar_rows)})
+            if days:
+                insert = sqlite_insert if s.bind.dialect.name == "sqlite" else pg_insert
+                table = CandleDayRevision.__table__
+                stmt = insert(table)
+                s.execute(stmt.on_conflict_do_update(
+                    index_elements=["feed", "day"],
+                    set_={
+                        "generation": table.c.generation + 1,
+                        "newest_known_at": case(
+                            (table.c.newest_known_at > stmt.excluded.newest_known_at, table.c.newest_known_at),
+                            else_=stmt.excluded.newest_known_at,
+                        ),
+                    },
+                ), [dict(feed=feed, day=day, generation=1, newest_known_at=known_at) for day in days])
+                changed = {}
+                for row in (*coverage_rows, *bar_rows):
+                    symbol, minute = row["symbol"], row["event_time"]
+                    changed[symbol] = min(minute, changed.get(symbol, minute))
+                table = CandleProgress.__table__
+                stmt = insert(table)
+                s.execute(stmt.on_conflict_do_update(
+                    index_elements=["feed", "symbol"],
+                    set_={
+                        "generation": table.c.generation + 1,
+                        "dirty_from": case(
+                            (table.c.dirty_from < stmt.excluded.dirty_from, table.c.dirty_from),
+                            else_=stmt.excluded.dirty_from,
+                        ),
+                        "newest_known_at": case(
+                            (table.c.newest_known_at > stmt.excluded.newest_known_at, table.c.newest_known_at),
+                            else_=stmt.excluded.newest_known_at,
+                        ),
+                    },
+                ), [
+                    dict(feed=feed, symbol=symbol, generation=1, dirty_from=changed[symbol], newest_known_at=known_at)
+                    for symbol in sorted(changed)
+                ])
 
-    def coverage(self, symbol, start, end, as_of):
+    def coverage(self, symbol, start, end, as_of, *, feed=None):
         with self.store.session() as s:
             rows = s.scalars(
                 select(Coverage)
                 .where(
                     Coverage.symbol == symbol,
+                    *((Coverage.feed == feed,) if feed is not None else ()),
                     Coverage.event_time >= start,
                     Coverage.event_time < end,
                     Coverage.known_at <= as_of,
                 )
-                .order_by(Coverage.known_at, Coverage.record_id)
+                .order_by(Coverage.status == "VERIFIED_BAR", Coverage.status == "VERIFIED_NONE",
+                          Coverage.known_at, Coverage.record_id)
             ).all()
         lookup = {aware(r.event_time): r.status for r in rows}
         result = []
@@ -234,9 +375,13 @@ class FeatureStore:
                 published = item["created_at"]
                 if isinstance(published, str):
                     published = datetime.fromisoformat(published.replace("Z", "+00:00"))
-                headline, summary = normalize(item["headline"], 300), normalize(item.get("summary", ""), 1000)
+                revision = item.get("updated_at") or published
+                if isinstance(revision, str):
+                    revision = datetime.fromisoformat(revision.replace("Z", "+00:00"))
+                headline, summary = normalize(item["headline"], 300), normalize(item.get("summary") or "", 1000)
                 provider = str(item.get("source", "unknown"))
-                key = digest([provider, str(item["id"]), headline, summary])
+                symbols = sorted(set(item.get("symbols") or []))
+                key = digest([provider, str(item["id"]), revision, headline, summary, symbols])
                 if s.get(Article, key) is None:
                     prior = s.scalars(
                         select(Article)
@@ -257,32 +402,34 @@ class FeatureStore:
                         ),
                         cluster(headline),
                     )
-                    s.add(
-                        Article(
+                    once(s, Article, dict(
                             article_id=key,
                             provider_id=str(item["id"]),
                             provider=provider,
                             published_at=published,
+                            revision_at=revision,
                             known_at=known_at,
                             headline=headline,
                             summary=summary,
-                            symbols=item.get("symbols", []),
+                            symbols=symbols,
                             cluster_id=cluster_id,
                             features=extract(headline + " " + summary),
-                        )
-                    )
+                    ))
 
     def news_bundle(self, as_of, symbols, hours=4):
         with self.store.session() as s:
-            rows = s.scalars(
+            versions = s.scalars(
                 select(Article)
                 .where(
                     Article.known_at <= as_of,
                     Article.published_at <= as_of,
                     Article.published_at >= as_of - timedelta(hours=hours),
+                    or_(Article.revision_at.is_(None), Article.revision_at <= as_of),
                 )
-                .order_by(Article.published_at, Article.article_id)
+                .order_by(func.coalesce(Article.revision_at, Article.published_at), Article.known_at, Article.article_id)
             ).all()
+        rows = sorted({(r.provider, r.provider_id): r for r in versions}.values(),
+                      key=lambda row: (row.published_at, row.article_id))
         return [
             dict(
                 article_id=r.article_id,
@@ -292,6 +439,8 @@ class FeatureStore:
                 source=r.provider,
                 symbols=r.symbols,
                 published_at=aware(r.published_at).isoformat(),
+                first_seen_at=aware(r.known_at).isoformat(),
+                revision_at=aware(r.revision_at).isoformat() if r.revision_at else None,
                 features=r.features,
             )
             for r in rows

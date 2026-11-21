@@ -15,10 +15,11 @@ StopReason = Literal["end_turn", "tool_use", "max_tokens", "refusal", "error"]
 
 
 class LLMError(RuntimeError):
-    def __init__(self, message: str, retryable: bool = False, retry_after_s: float = 1) -> None:
+    def __init__(self, message: str, retryable: bool = False, retry_after_s: float = 1, *, status_code: int | None = None) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.retry_after_s = retry_after_s
+        self.status_code = status_code
 
 
 class LLMContractError(LLMError):
@@ -75,6 +76,7 @@ class LLMResponse:
     model: str
     provider: str
     request_id: str | None = None
+    provider_tokens: tuple[int, float] | None = None
 
     @property
     def text(self) -> str:

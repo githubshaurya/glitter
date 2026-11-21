@@ -95,6 +95,7 @@ class CycleSnapshotPayload(BaseModel):
     EVENT_TYPE: ClassVar[str] = "cycle.snapshot"
     snapshot: MarketSnapshot
     bar_close: datetime | None = None
+    feature_read_ms: int | None = None
 
 
 class CycleSkippedPayload(BaseModel):
@@ -170,6 +171,10 @@ class DecisionPayload(BaseModel):
     total_cost_usd: float = 0.0
     error: str | None = None
     notes: list[str] = Field(default_factory=list)  # sizing skips, capped actions, circuit breaker, ...
+    queue_wait_ms: int | None = None
+    council_ms: int | None = None
+    quota_wait_ms: int | None = None
+    deadline_missed: bool = False
 
 
 class ProposalPayload(BaseModel):
@@ -185,6 +190,7 @@ class ProposalPayload(BaseModel):
     qty: int = Field(gt=0)
     limit_price: float = Field(gt=0)
     reference_price: float = Field(gt=0)  # quote mid used for sizing
+    analysis_entry_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     notional: float = Field(gt=0)
     conviction: float = Field(ge=0, le=1)
     rationale: str = ""
@@ -204,6 +210,8 @@ class VerdictPayload(BaseModel):
     approved: bool
     reason: str = ""
     checks: list[CheckResultPayload] = Field(default_factory=list)
+    lock_wait_ms: int | None = None
+    broker_state_ms: int | None = None
 
 
 class OrderProtection(BaseModel):
@@ -222,6 +230,7 @@ class OrderCommandPayload(BaseModel):
     side: Literal["buy", "sell"]
     qty: int = Field(gt=0)
     limit_price: float = Field(gt=0)
+    analysis_entry_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     time_in_force: Literal["day", "ioc", "gtc"] = "day"
     signature: str = ""  # HMAC minted by this lane's risk gate
     account_ref: str | None = None
@@ -251,6 +260,9 @@ class SubmissionPayload(BaseModel):
     status: Literal["submitted", "rejected", "recovered_duplicate", "blocked", "expired", "unknown", "not_sent"]
     alpaca_order_id: str | None = None
     broker_submitted_at: datetime | None = None
+    broker_request_ms: float | None = None
+    quote_age_at_send_ms: float | None = None
+    submit_outcome_unknown: bool = False
     error: str | None = None
 
 

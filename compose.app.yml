@@ -2,6 +2,7 @@ name: glitter-council-app
 
 services:
   kafka:
+    profiles: [kafka]
     extends:
       file: docker-compose.yml
       service: kafka
@@ -14,6 +15,7 @@ services:
     ports: !reset []
 
   kafka-init:
+    profiles: [kafka]
     extends:
       file: docker-compose.yml
       service: kafka-init
@@ -36,24 +38,32 @@ services:
     security_opt: [no-new-privileges:true]
     tmpfs:
       - /tmp
+    volumes:
+      - replay-history:/var/cache/glitter
     environment:
       TRADER_VIEWER_PORT: ${APP_PORT:-8765}
+      TRADER_VIEWER_WARM_WORKERS: "1"
+      TRADER_REPLAY_CACHE_DIR: /var/cache/glitter
       TRADER_VIEWER_DATABASE_URL: postgresql+psycopg://trader:${POSTGRES_PASSWORD:-trader}@postgres:5432/trader
       ALPACA_PAPER_KEY_ID: ${ALPACA_PAPER_KEY_ID:-}
       ALPACA_PAPER_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      ALPACA_REPLAY_KEY_ID: ${ALPACA_REPLAY_KEY_ID:-}
+      ALPACA_REPLAY_SECRET_KEY: ${ALPACA_REPLAY_SECRET_KEY:-}
+      GROQ_API_KEY: ${GROQ_REPLAY_API_KEY:-${GROQ_API_KEY:-}}
       LLM_PROFILE_LIVE: ${LLM_PROFILE_LIVE:-primary}
       LLM_PROFILE_SHADOW: ${LLM_PROFILE_SHADOW:-}
+      TRADER_LLM_QUOTA_DATABASE_URL: ${TRADER_LLM_QUOTA_DATABASE_URL:-}
       EXECUTION_ENABLED: "false"
     ports:
       - "127.0.0.1:${APP_PORT:-8765}:${APP_PORT:-8765}"
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+        required: false
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['TRADER_VIEWER_PORT'] + '/api/simulations', timeout=3).close()"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['TRADER_VIEWER_PORT'] + '/health/ready', timeout=3).close()"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -61,3 +71,4 @@ services:
 volumes:
   kafka-data:
   pg-data:
+  replay-history:

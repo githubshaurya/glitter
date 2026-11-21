@@ -1,6 +1,6 @@
 """Dimensional audit projection for the viewer's historical and interactive decisions."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from threading import Lock
 from uuid import uuid4
@@ -11,13 +11,16 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     Numeric,
     String,
     Table,
+    and_,
     create_engine,
     delete,
+    or_,
     select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -69,6 +72,13 @@ FACT_FILL = Table(
     Column("price", Numeric(22, 8), nullable=False), Column("filled_at", DateTime(timezone=True)),
     Column("detail", JSON_VALUE, nullable=False),
 )
+AUDIT_INDEXES = (
+    Index("ix_fact_decision_scope_time", FACT_DECISION.c.scope, FACT_DECISION.c.as_of, FACT_DECISION.c.decision_id),
+    Index("ix_fact_decision_scope_date", FACT_DECISION.c.scope, FACT_DECISION.c.date_id, FACT_DECISION.c.as_of),
+    Index("ix_fact_decision_scope_instrument", FACT_DECISION.c.scope, FACT_DECISION.c.instrument_id, FACT_DECISION.c.as_of),
+    Index("ix_fact_decision_scope_strategy", FACT_DECISION.c.scope, FACT_DECISION.c.strategy_id, FACT_DECISION.c.as_of),
+    Index("ix_fact_role_log_scope_role", FACT_ROLE_LOG.c.scope, FACT_ROLE_LOG.c.role_id, FACT_ROLE_LOG.c.decision_id),
+)
 
 
 def public_attempts(entry):
@@ -113,6 +123,57 @@ def role_rows(roles, result, attempts):
                        model=response.get("model"), latency_ms=response.get("latency_ms"), detail=attempt)
 
 
+def _role_names(result, attempts):
+    return tuple(dict.fromkeys((*ROLES, *result.get("reports", {}), *(a["role"] for a in attempts if a["role"]))))
+
+
+def _summary(detail):
+    result = detail.get("result", {})
+    outcome = result.get("outcome") or detail.get("outcome") or "RECORDED"
+    actions = [d["action"] for d in result.get("decisions", []) if d.get("action")]
+    action = (detail.get("recommendation") or {}).get("action") or (
+        ", ".join(actions) if actions else "hold" if outcome == "DECIDED_HOLD" else "none"
+    )
+    elapsed = detail.get("elapsed_s")
+    return dict(outcome=outcome, action=action, latency_ms=round(elapsed * 1000) if elapsed is not None else None)
+
+
+def _render_star(decision, role_logs, fill_rows):
+    return {
+        "decision": decision,
+        "role_logs": [
+            {"role": row["role_id"], "attempt": row["detail"].get("attempt") if row["sequence"] else None,
+             **{col: row[col] for col in ("sequence", "status", "model", "latency_ms")}}
+            for row in role_logs
+        ],
+        "fills": [
+            {"order_id": row["order_id"], "side": row["side"],
+             "shares": format(row["shares"].normalize(), "f") if row["shares"] is not None else None,
+             "price": format(row["price"].normalize(), "f"), "at": row["detail"].get("t")}
+            for row in fill_rows
+        ],
+    }
+
+
+def preview_audit(decision_id, detail, *, symbol, portfolio, strategy, company=None):
+    """Render a committed decision while the background worker projects its facts."""
+    date = event_time(detail["as_of"]).astimezone(ET).date().isoformat()
+    result = detail.get("result", {})
+    attempts = public_attempts(detail)
+    roles = _role_names(result, attempts)
+    decision = dict(id=decision_id, date=date, instrument=symbol, portfolio=portfolio, strategy=strategy,
+                    **_summary(detail))
+    fills = detail.get("fills", [])
+    fill_rows = [
+        dict(order_id=row["order_id"], side=row.get("side"),
+             shares=Decimal(str(row["qty"])) if row.get("qty") is not None else None,
+             price=Decimal(str(row["price"])), detail=row)
+        for row in fills
+    ]
+    return {**detail, "attempts": attempts, "fills": fills,
+            "star": _render_star(decision, role_rows(roles, result, attempts), fill_rows)}
+
+
 def read_facts(connection, key):
     decision = connection.execute(
         select(FACT_DECISION, DIM_DATE.c.id.label("date"), DIM_INSTRUMENT.c.id.label("instrument"),
@@ -144,26 +205,10 @@ def read_facts(connection, key):
         if reports:
             result["reports"] = reports
     attempts = sorted((row for row in role_logs if row["attempt_order"] is not None), key=lambda row: row["attempt_order"])
-    return {
-        **detail, "attempts": [row["detail"] for row in attempts], "fills": [row["detail"] for row in fill_rows],
-        "star": {
-            "decision": {
-                "id": decision["decision_id"],
-                **{col: decision[col] for col in ("date", "instrument", "portfolio", "strategy", "outcome", "action", "latency_ms")},
-            },
-            "role_logs": [
-                {"role": row["role_id"], "attempt": row["detail"].get("attempt") if row["sequence"] else None,
-                 **{col: row[col] for col in ("sequence", "status", "model", "latency_ms")}}
-                for row in role_logs
-            ],
-            "fills": [
-                {"order_id": row["order_id"], "side": row["side"],
-                 "shares": format(row["shares"].normalize(), "f") if row["shares"] is not None else None,
-                 "price": format(row["price"].normalize(), "f"), "at": row["detail"].get("t")}
-                for row in fill_rows
-            ],
-        },
-    }
+    dimensions = ("date", "instrument", "portfolio", "strategy", "outcome", "action", "latency_ms")
+    summary = {"id": decision["decision_id"], **{col: decision[col] for col in dimensions}}
+    return {**detail, "attempts": [row["detail"] for row in attempts], "fills": [row["detail"] for row in fill_rows],
+            "star": _render_star(summary, role_logs, fill_rows)}
 
 
 class StarJournal:
@@ -172,10 +217,51 @@ class StarJournal:
         self.closed = False
         self.lock = Lock()
         options = {"pool_pre_ping": True} if url else {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
+        if url and url.startswith("postgresql"):
+            options.update(pool_timeout=2, connect_args={"connect_timeout": 2, "options": "-c statement_timeout=2000"})
         self.engine = create_engine(url or "sqlite://", **options)
         self.insert = postgres_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
         if create or not url:
             STAR.create_all(self.engine)
+
+    def ready(self):
+        with self.lock, self.engine.connect() as connection:
+            for table in STAR.sorted_tables:
+                connection.execute(select(next(iter(table.c))).limit(0))
+
+    def projected_ids(self):
+        with self.lock, self.engine.connect() as connection:
+            return set(connection.scalars(select(FACT_DECISION.c.decision_id).where(FACT_DECISION.c.scope == self.scope)))
+
+    def list_decisions(self, *, day=None, instrument=None, strategy=None, role=None, before=None, limit=25):
+        d = FACT_DECISION.c
+        filters = [d.scope == self.scope]
+        if day:
+            filters.append(d.date_id == date.fromisoformat(day).isoformat())
+        if instrument:
+            filters.append(d.instrument_id == instrument.upper())
+        if strategy:
+            filters.append(d.strategy_id == strategy)
+        if role:
+            logs = FACT_ROLE_LOG.c
+            filters.append(select(logs.scope).where(
+                logs.scope == d.scope, logs.decision_id == d.decision_id,
+                logs.role_id == role.upper(), logs.status != "SKIPPED",
+            ).exists())
+        if before:
+            timestamp, separator, identifier = before.partition("|")
+            if not separator or not identifier or len(identifier) > 256:
+                raise ValueError("Invalid audit cursor")
+            at = event_time(timestamp)
+            filters.append(or_(d.as_of < at, and_(d.as_of == at, d.decision_id < identifier)))
+        with self.lock, self.engine.connect() as connection:
+            rows = connection.execute(select(
+                d.decision_id.label("id"), d.as_of, d.date_id.label("date"), d.instrument_id.label("instrument"),
+                d.strategy_id.label("strategy"), d.outcome, d.latency_ms,
+            ).where(*filters).order_by(d.as_of.desc(), d.decision_id.desc()).limit(limit + 1)).mappings().all()
+        items = [dict(row, as_of=row["as_of"].replace(tzinfo=row["as_of"].tzinfo or UTC).isoformat()) for row in rows[:limit]]
+        cursor = f"{items[-1]['as_of']}|{items[-1]['id']}" if len(rows) > limit else None
+        return {"items": items, "next_cursor": cursor}
 
     def get(self, decision_id):
         key = dict(scope=self.scope, decision_id=decision_id)
@@ -195,15 +281,9 @@ class StarJournal:
         payload = {k: v for k, v in detail.items() if k not in ("attempts", "fills")}
         result = detail.get("result", {})
         attempts = public_attempts(detail)
-        roles = tuple(dict.fromkeys((*ROLES, *result.get("reports", {}), *(a["role"] for a in attempts if a["role"]))))
+        roles = _role_names(result, attempts)
         if "result" in payload:
             payload["result"] = {k: v for k, v in result.items() if k not in ("reports", "draft", "skeptic")}
-        outcome = result.get("outcome") or detail.get("outcome") or "RECORDED"
-        actions = [d["action"] for d in result.get("decisions", []) if d.get("action")]
-        action = (detail.get("recommendation") or {}).get("action") or (
-            ", ".join(actions) if actions else "hold" if outcome == "DECIDED_HOLD" else "none"
-        )
-        elapsed = detail.get("elapsed_s")
         with self.lock, self.engine.begin() as connection:
             if self.closed:
                 raise SQLAlchemyError("The viewer's audit session has closed.")
@@ -218,8 +298,7 @@ class StarJournal:
                     dict(id=role, position=position) for position, role in enumerate(roles)
                 ]).on_conflict_do_nothing())
                 connection.execute(FACT_DECISION.insert(), {
-                    **key, **dims, "as_of": when, "outcome": outcome, "action": action,
-                    "latency_ms": round(elapsed * 1000) if elapsed is not None else None, "detail": payload,
+                    **key, **dims, "as_of": when, **_summary(detail), "detail": payload,
                 })
                 connection.execute(FACT_ROLE_LOG.insert(), [{**key, **dims, **row} for row in role_rows(roles, result, attempts)])
                 fills = []

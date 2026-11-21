@@ -3,11 +3,12 @@
 from datetime import datetime
 from itertools import batched
 
-from sqlalchemy import column, or_, select, values
+from sqlalchemy import String, column, or_, select, values
 from sqlalchemy.orm import aliased
 
 from trader.features.models import FeatureValue, Gap, MarketSession, SourceHealth
 from trader.features.registry import REGISTRY, registry_hash
+from trader.features.storage import bar_gap_scope
 from trader.store.repo import aware
 
 
@@ -17,11 +18,16 @@ class Assembler:
         self.min_ok_fraction = min_ok_fraction
         self.cfg = cfg
 
-    def assemble(self, as_of, symbols, account_ref):
+    def assemble(self, as_of, symbols, account_ref, *, slot_manifest=None):
+        fixed = (slot_manifest or {}).get("records", {})
+        feed = (slot_manifest or {}).get("feed") or (self.cfg.data_feed if self.cfg else None)
+        gap_scopes = {"all", *symbols}
+        if feed:
+            gap_scopes.update(bar_gap_scope(feed, symbol) for symbol in symbols)
         with self.features.store.session() as s:
             entities = [*(("symbol", symbol) for symbol in sorted(set(symbols))), ("market", "market"), ("portfolio", account_ref)]
             keys = (
-                (entity_type, entity_id, name, definition.feature_version)
+                (entity_type, entity_id, name, definition.feature_version, fixed.get(f"{entity_type}:{entity_id}:{name}"))
                 for entity_type, entity_id in entities
                 for name, definition in REGISTRY.items()
                 if definition.entity_type == entity_type
@@ -29,7 +35,9 @@ class Assembler:
             rows = []
             batch_size = 200 if s.get_bind().dialect.name == "sqlite" else 10000
             for batch in batched(keys, batch_size):
-                requested = values(column("kind"), column("entity"), column("name"), column("version")).data(batch).cte(
+                requested = values(
+                    column("kind"), column("entity"), column("name"), column("version"), column("fixed_record", String),
+                ).data(batch).cte(
                     "feature_requests"
                 )
                 candidate = aliased(FeatureValue)
@@ -43,6 +51,7 @@ class Assembler:
                         candidate.version == requested.c.version,
                         candidate.event_time <= as_of,
                         candidate.known_at <= as_of,
+                        or_(requested.c.fixed_record.is_(None), candidate.rec_hash == requested.c.fixed_record),
                     )
                     .order_by(candidate.event_time.desc(), candidate.known_at.desc(), candidate.rec_hash.desc())
                     .limit(1)
@@ -57,7 +66,10 @@ class Assembler:
                 )
                 rows.extend(s.scalars(select(FeatureValue).join(matches, FeatureValue.rec_hash == matches.c.rec_hash)))
             gaps = s.scalars(
-                select(Gap).where(Gap.detected_at <= as_of, or_(Gap.healed_at.is_(None), Gap.healed_at > as_of))
+                select(Gap).where(
+                    Gap.scope.in_(gap_scopes), Gap.detected_at <= as_of,
+                    or_(Gap.healed_at.is_(None), Gap.healed_at > as_of),
+                )
             ).all()
             sessions = s.scalars(
                 select(MarketSession)
@@ -91,11 +103,16 @@ class Assembler:
             portfolio={},
             availability={},
         )
+        if slot_manifest is not None:
+            content["feature_slot"] = slot_manifest
         for entity_type, entity_id, target in [
             *(("symbol", symbol, content["symbols"].setdefault(symbol, {})) for symbol in sorted(symbols)),
             ("market", "market", content["market"]),
             ("portfolio", account_ref, content["portfolio"]),
         ]:
+            relevant_scopes = {entity_id, "all"}
+            if feed:
+                relevant_scopes.add(bar_gap_scope(feed, entity_id))
             for name, definition in REGISTRY.items():
                 if definition.entity_type != entity_type:
                     continue
@@ -113,7 +130,7 @@ class Assembler:
                     start = datetime.fromisoformat(quality.get("window_start", aware(row.event_time).isoformat()))
                     end = datetime.fromisoformat(quality.get("window_end", aware(row.event_time).isoformat()))
                     if any(
-                        g.scope in (entity_id, "all")
+                        g.scope in relevant_scopes
                         and aware(g.window_start) < end
                         and aware(g.window_end) > start
                         and (g.healed_at is None or aware(g.healed_at) > as_of)

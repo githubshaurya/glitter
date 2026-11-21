@@ -6,9 +6,9 @@ from trader.broker.base import RateLimiter
 
 
 class AlpacaTickHistory:
-    def __init__(self, key, secret, feed, transport=None):
+    def __init__(self, key, secret, feed, transport=None, *, requests_per_minute=60):
         self.feed = feed
-        self.limiter = RateLimiter(60)
+        self.limiter = RateLimiter(requests_per_minute)
         self.client = httpx.Client(
             base_url="https://data.alpaca.markets",
             timeout=httpx.Timeout(8, connect=3),

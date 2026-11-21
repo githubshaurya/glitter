@@ -19,6 +19,7 @@ import json
 import re
 import time
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 import openai
@@ -123,6 +124,10 @@ class OpenAICompatClient:
         self._options = opts
         # local servers ignore the key but the SDK requires a non-empty one
         self._client = openai.OpenAI(api_key=api_key or "not-needed", base_url=base_url, max_retries=max_retries)
+        self._async_client: openai.AsyncOpenAI | None = None
+        self.is_groq = self._client.base_url.host == "api.groq.com"
+        if self.is_groq:
+            self._client.max_retries = 0
 
     # ------------------------------------------------------------------ conversion
     def _to_api_messages(self, system: str, messages: list[Message], tools: list[ToolSpec]) -> list[dict[str, Any]]:
@@ -172,7 +177,7 @@ class OpenAICompatClient:
         return out
 
     # ------------------------------------------------------------------ call
-    def chat(
+    def _request(
         self,
         *,
         system: str,
@@ -181,7 +186,7 @@ class OpenAICompatClient:
         max_tokens: int,
         timeout: float,
         response_schema: dict[str, Any] | None = None,
-    ) -> LLMResponse:
+    ) -> dict[str, Any]:
         native = self._tool_calling == "native"
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -209,12 +214,17 @@ class OpenAICompatClient:
                 }
                 for t in tools
             ]
-        started = time.monotonic()
+        return kwargs
+
+    @contextmanager
+    def _provider_errors(self, tools):
         try:
-            resp = self._client.chat.completions.create(**kwargs)
+            yield
         except (openai.APITimeoutError, openai.APIConnectionError) as exc:
             raise LLMError(f"openai_compat connection/timeout: {exc!r}", retryable=True) from exc
         except openai.APIStatusError as exc:
+            if self.is_groq and exc.status_code == 429:
+                raise LLMError(f"openai_compat 429: {exc}", status_code=429) from exc
             body = exc.body if isinstance(exc.body, dict) else {}
             detail = body.get("error", body)
             code = detail.get("code") if isinstance(detail, dict) else None
@@ -237,9 +247,11 @@ class OpenAICompatClient:
             ):
                 raise LLMContractError(f"provider generated schema-invalid JSON: {exc}") from exc
             retryable = exc.status_code in (408, 409, 429) or exc.status_code >= 500 or _tool_generation_failed(exc)
+            explicit_retry = exc.response.headers.get("retry-after")
             try:
-                retry_after = max(0, float(exc.response.headers.get("retry-after", "1")))
+                retry_after = max(0, float(explicit_retry)) if explicit_retry is not None else 1
             except (ValueError, TypeError):
+                explicit_retry = None
                 retry_after = 1
             if exc.status_code == 429:
                 # Some compatible servers put the token-bucket delay only in the body.
@@ -247,10 +259,43 @@ class OpenAICompatClient:
                 hint = re.search(rf"try again in\s+((?:{part}\s*)+)\b", str(exc).lower())
                 units = {"d": 86400, "h": 3600, "m": 60, "s": 1, "ms": 0.001}
                 seconds = sum(float(value) * units[unit] for value, unit in re.findall(part, hint[1])) if hint else 0
-                retry_after = max(retry_after, seconds + 1, 8)
+                retry_after = max(retry_after, seconds + 0.1) if explicit_retry is not None or hint else 8
             raise LLMError(
-                f"openai_compat {exc.status_code}: {exc}", retryable=retryable, retry_after_s=retry_after
+                f"openai_compat {exc.status_code}: {exc}", retryable=retryable, retry_after_s=retry_after,
+                status_code=exc.status_code,
             ) from exc
+
+    def chat(
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        max_tokens: int,
+        timeout: float,
+        response_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        kwargs = self._request(system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                               timeout=timeout, response_schema=response_schema)
+        started = time.monotonic()
+        with self._provider_errors(tools):
+            response = self._client.chat.completions.create(**kwargs)
+        return self._response(response, tools, started)
+
+    async def chat_async(self, *, system, messages, tools, max_tokens, timeout, response_schema=None):
+        kwargs = self._request(system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                               timeout=timeout, response_schema=response_schema)
+        if self._async_client is None:
+            self._async_client = openai.AsyncOpenAI(
+                api_key=self._client.api_key, base_url=self._client.base_url, max_retries=self._client.max_retries,
+            )
+        started = time.monotonic()
+        with self._provider_errors(tools):
+            response = await self._async_client.chat.completions.create(**kwargs)
+        return self._response(response, tools, started)
+
+    def _response(self, resp, tools, started):
+        native = self._tool_calling == "native"
         latency_ms = int((time.monotonic() - started) * 1000)
 
         choice = resp.choices[0]

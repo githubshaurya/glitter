@@ -8,7 +8,7 @@ import sys
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -19,13 +19,25 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from trader.backtest.history import (
+    ReplayHistoryCache,
+    cache_seed,
+    completed_bars,
+    seed_cache_key,
+    trim_replay_history,
+    window_revisions,
+)
+from trader.backtest.intraday import QuoteTape
 from trader.config import PAPER_TRADING_HOST, get_settings, get_trading_config
 from trader.council.v2 import size_with_gate_reduction
 from trader.council.v2_engine import ScoredCouncil
 from trader.events.envelope import utcnow
-from trader.events.payloads import AccountSnap, BarSnap, ClockSnap, PositionSnap, ProposalPayload, QuoteSnap
+from trader.events.payloads import AccountSnap, BarSnap, ClockSnap, PositionSnap, ProposalPayload
 from trader.features.evidence import Assembler
 from trader.features.functions import digest
+from trader.features.models import CandleProgress, FeatureState
+from trader.features.rolling import VERSION as ROLLING_VERSION
+from trader.features.rolling import RollingFeatures, continue_replay_seed
 from trader.features.storage import FeatureStore
 from trader.features.worker import FeatureWorker
 from trader.llm.factory import build_client, load_profiles
@@ -105,6 +117,10 @@ def recommendation(action, shares, limit, scenario, cash):
 class AlpacaReadOnly:
     def __init__(self, client: httpx.Client):
         self.client = client
+
+    @property
+    def cache_scope(self):
+        return digest(self.client.headers.get("APCA-API-KEY-ID", ""))
 
     def get(self, host, path, **params):
         try:
@@ -199,12 +215,8 @@ class AlpacaReadOnly:
             limit=1,
             feed=feed,
         )
-        for quote in data.get("quotes") or []:
-            stamp = datetime.fromisoformat(quote["t"])
-            bid, ask = float(quote["bp"]), float(quote["ap"])
-            if stamp <= at and 0 < bid <= ask:
-                return QuoteSnap(symbol=symbol, ts=stamp, bid=bid, ask=ask, mid=(bid + ask) / 2)
-        return None
+        rows = [{"bs": 0, "as": 0, **row} for row in (data.get("quotes") or [])]
+        return QuoteTape(symbol, rows, alpaca_history=True).quote_at(at, max_age_seconds=60)
 
     def news(self, symbol, at, *, since=None):
         since = since or at - timedelta(hours=48)
@@ -232,66 +244,138 @@ class AlpacaReadOnly:
 
 
 def open_alpaca():
-    try:
-        key, secret = get_settings().alpaca_credentials()
-    except RuntimeError as exc:
-        raise ScenarioError("Alpaca paper credentials are missing from the server environment.") from exc
+    key, secret = os.environ.get("ALPACA_REPLAY_KEY_ID"), os.environ.get("ALPACA_REPLAY_SECRET_KEY")
+    if bool(key) != bool(secret):
+        raise ScenarioError("Configure both Alpaca replay credentials together.")
+    if not key:
+        try:
+            key, secret = get_settings().alpaca_credentials()
+        except RuntimeError as exc:
+            raise ScenarioError("Alpaca paper credentials are missing from the server environment.") from exc
     return httpx.Client(timeout=15, headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret})
 
 
-def completed_bars(providers, sessions, symbols, feed):
-    windows = [
-        (sessions[i]["open"], sessions[min(i + 7, len(sessions) - 1)]["close"]) for i in range(0, len(sessions), 8)
-    ]
-    if not windows:
-        return {}
-    with ThreadPoolExecutor(max_workers=min(3, len(windows))) as pool:
-        requests = [pool.submit(providers.bars, symbols, start, end, feed) for start, end in windows]
-        return {day: bars for request in requests for day, bars in request.result().items()}
-
-
-def open_feature_history(providers, workdir, sessions, symbols, feed):
-    """Keep completed sessions in a short-lived cache. Always read the decision session separately."""
+def open_feature_history(providers, workdir, sessions, symbols, feed, *, rolling_config=None, cleanup=None):
+    """Reuse completed, revision-matched history and extend verified prefixes in place."""
     database = workdir / "scenario.db"
-    key = digest(["completed-sessions-v1", feed, symbols, sessions])
-    cache = workdir.parent / "completed-session-cache" / f"{key}.db"
-    try:
-        if time.time() - cache.stat().st_mtime <= HISTORY_CACHE_SECONDS:
-            shutil.copyfile(cache, database)
-            store = Store(f"sqlite:///{database.resolve().as_posix()}")
-            return store, FeatureStore(store), True
-    except OSError:
-        pass
-
+    seed_version = (ROLLING_VERSION, rolling_config.features.history_days) if rolling_config else None
+    scope = getattr(providers, "cache_scope", None)
+    directory = Path(os.environ.get("TRADER_REPLAY_CACHE_DIR") or workdir.parent / "market-history-cache")
+    cache_dir = workdir.parent / "completed-session-cache"
     previous = sessions[:-1]
-    grouped = completed_bars(providers, previous, symbols, feed)
-    store = Store(f"sqlite:///{database.resolve().as_posix()}")
-    store.init_schema()
-    fs = FeatureStore(store)
-    cacheable = bool(previous)
-    with store.session():
-        fs.calendar(sessions, sessions[0]["open"] - timedelta(days=1))
-        for row in previous:
-            bars = grouped.get(row["date"], {})
-            fs.ingest_minutes(symbols, row["open"], row["close"], bars, row["close"], feed=feed)
-            cacheable &= all(
-                any(row["open"] <= bar.t < row["close"] for bar in bars.get(symbol, [])) for symbol in symbols
-            )
+    cache_scope = digest(["completed-sessions-v5", scope, feed, symbols, seed_version])
+
+    def cached_file(selected, revisions):
+        return cache_dir / f"{digest([cache_scope, selected, revisions])}.db"
+
+    def store_for_run():
+        return Store(f"sqlite:///{database.resolve().as_posix()}")
+
+    reusable, trim = 0, False
+    with ReplayHistoryCache.open(directory, scope, feed) as shared:
+        revisions = shared.revisions(previous, symbols)
+        complete_prefix = next((i for i, row in enumerate(revisions) if len(row) != len(symbols)), len(previous))
+        for i in range(complete_prefix, 0, -1):
+            candidate = cached_file(sessions[:i + 1], revisions[:i])
+            with suppress(OSError):
+                if time.time() - candidate.stat().st_mtime <= HISTORY_CACHE_SECONDS:
+                    shutil.copyfile(candidate, database)
+                    reusable = i
+                    break
+        if reusable < complete_prefix:
+            keys = window_revisions(previous[:complete_prefix], revisions[:complete_prefix])
+            candidate = None
+            candidates = sorted(cache_dir.glob("*.meta"))
+            for manifest in candidates:
+                with suppress(OSError, ValueError, TypeError):
+                    if time.time() - manifest.stat().st_mtime > HISTORY_CACHE_SECONDS:
+                        continue
+                    cached_scope, cached_keys = json.loads(manifest.read_text(encoding="utf-8"))
+                    file = manifest.with_suffix(".db")
+                    if cached_scope != cache_scope or not isinstance(cached_keys, list) or keys[0] not in cached_keys:
+                        continue
+                    start = cached_keys.index(keys[0])
+                    shared_days = 0
+                    for saved, expected in zip(cached_keys[start:], keys, strict=False):
+                        if saved != expected:
+                            break
+                        shared_days += 1
+                    if shared_days > reusable and file.is_file():
+                        candidate, reusable = file, shared_days
+            if candidate is not None:
+                try:
+                    shutil.copyfile(candidate, database)
+                    trim = True
+                except OSError:
+                    reusable = 0
+        store = store_for_run()
+        if cleanup is not None:
+            cleanup.callback(store.engine.dispose)
+        fs = FeatureStore(store)
+        if reusable and not trim and reusable == len(previous):
+            return store, fs, True
+        if trim:
+            trim_replay_history(store, sessions, reusable)
+        if not reusable:
+            store.init_schema()
+        revisions = revisions[:reusable]
+        with store.session():
+            fs.calendar(sessions, sessions[0]["open"] - timedelta(days=1))
+            for row, bars, day_revisions in completed_bars(providers, shared, previous[reusable:], symbols, feed):
+                fs.ingest_minutes(symbols, row["open"], row["close"], bars, row["close"], feed=feed)
+                revisions.append(day_revisions)
+        cacheable = bool(previous) and all(len(row) == len(symbols) for row in revisions)
+        if cacheable and rolling_config is not None:
+            opening = sessions[-1]["open"]
+            worker = RollingFeatures(fs, rolling_config)
+            for symbol in symbols:
+                seed_id = seed_cache_key(shared, symbol, sessions, revisions, *seed_version)
+                state = shared.seed(seed_id)
+                seed_key = f"rolling-seed:{feed}:{symbol}"
+                if state is None:
+                    # A shifted left edge changes recursive indicators. Only exact prefixes qualify.
+                    for i in range(len(previous) - 1, 0, -1):
+                        prior_id = seed_cache_key(shared, symbol, sessions[:i + 1], revisions[:i], *seed_version)
+                        if prior := shared.seed(prior_id):
+                            with store.session() as db:
+                                state = continue_replay_seed(db, symbol, feed, sessions, opening, prior, i, seed_version[1])
+                            if state is not None:
+                                break
+                if state is None:
+                    worker.refresh_symbol(symbol, opening, opening)
+                    with store.session() as db:
+                        row = db.get(FeatureState, seed_key)
+                        state = row.state if row else None
+                else:
+                    with store.session() as db:
+                        db.merge(FeatureState(key=seed_key, version=ROLLING_VERSION, last_bucket=opening,
+                                              updated_at=opening, state=state, input_hash=state["shape"]))
+                        progress = db.get(CandleProgress, (feed, symbol))
+                        if progress is not None:
+                            progress.dirty_from = None
+                if state is not None:
+                    cache_seed(shared, seed_id, state)
     if cacheable:
         store.engine.dispose()
         temp = workdir / "feature-history.tmp"
+        metadata = workdir / "feature-history-meta.tmp"
         try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(database, temp)
-            temp.replace(cache)
-            existing = sorted(cache.parent.glob("*.db"), key=lambda path: path.stat().st_mtime, reverse=True)
+            cached = cached_file(sessions, revisions)
+            temp.replace(cached)
+            metadata.write_text(json.dumps([cache_scope, window_revisions(previous, revisions)]), encoding="utf-8")
+            metadata.replace(cached.with_suffix(".meta"))
+            existing = sorted(cache_dir.glob("*.db"), key=lambda path: path.stat().st_mtime, reverse=True)
             for stale in existing[HISTORY_CACHE_FILES:]:
                 stale.unlink(missing_ok=True)
+                stale.with_suffix(".meta").unlink(missing_ok=True)
         except OSError:
             pass  # The scenario already has a committed database even if cache publication races or fails.
         finally:
             with suppress(OSError):
                 temp.unlink(missing_ok=True)
+                metadata.unlink(missing_ok=True)
     return store, fs, False
 
 
@@ -317,7 +401,7 @@ def scenario_client_factory(cfg):
     return factory
 
 
-def run_scenario(scenario, providers, workdir):
+def run_scenario(scenario, providers, workdir, *, cleanup=None):
     started = time.monotonic()
     cfg = get_trading_config().model_copy(deep=True)
     cfg.council.arbiter = "scored"
@@ -347,7 +431,7 @@ def run_scenario(scenario, providers, workdir):
 
     symbols = [scenario.symbol, cfg.benchmark]
     if latest:
-        store, fs, history_cached = open_feature_history(providers, workdir, sessions, symbols, cfg.data_feed)
+        store, fs, history_cached = open_feature_history(providers, workdir, sessions, symbols, cfg.data_feed, cleanup=cleanup)
         clock = providers.market_clock()
         at = settled_as_of(clock.timestamp)
         if not clock.is_open or not session["open"] <= at < session["close"]:
@@ -361,7 +445,7 @@ def run_scenario(scenario, providers, workdir):
         news_job = pool.submit(providers.news, scenario.symbol, at)
         account_job = pool.submit(providers.account)
         if not latest:
-            store, fs, history_cached = open_feature_history(providers, workdir, sessions, symbols, cfg.data_feed)
+            store, fs, history_cached = open_feature_history(providers, workdir, sessions, symbols, cfg.data_feed, cleanup=cleanup)
         grouped, quote, (articles, news) = bars_job.result(), quote_job.result(), news_job.result()
         account = account_job.result()
     timings = dict(warmup_s=round(data_started - started, 3), market_data_s=round(time.monotonic() - data_started, 3))
@@ -393,7 +477,7 @@ def run_scenario(scenario, providers, workdir):
         ("quotes", quote is not None),
         ("calendar", True),
         ("account", equity > 0),
-        ("news", news["status"] == "retrieved"),
+        ("news", news["status"] != "unavailable"),
     ):
         fs.health(source, at, success)
     for name, val in dict(
@@ -443,17 +527,22 @@ def run_scenario(scenario, providers, workdir):
         usable_cash_usd=capital,
         scenario_held_shares=scenario.held_shares,
         mode=scenario.mode,
+        structured_specialists=True,
+        optimize_review=True,
+        execution_limits={"buy": int(quote.ask_size or 0) if quote else 0,
+                          "sell": int(quote.bid_size or 0) if quote else 0},
     )
     run_id = "scenario-" + workdir.name
     council_started = time.monotonic()
     expires = at + LATEST_MAX_AGE if latest else utcnow() + timedelta(seconds=cfg.council_v2.run_deadline_s + 5)
-    result = ScoredCouncil(fs, cfg, scenario_client_factory(cfg), analysis_context=budget_context).run(
+    result = ScoredCouncil(fs, cfg, scenario_client_factory(cfg), analysis_context=budget_context, compact_replay=True).run(
         run_id, pack, expires, "historical-idea"
     )
     timings["council_s"] = round(time.monotonic() - council_started, 3)
     decision = recommendation("hold", 0, 0, scenario, capital)
     risk = []
-    sizes = size_with_gate_reduction(pack, result["decisions"], cfg)
+    sizing = []
+    sizes = size_with_gate_reduction(pack, result["decisions"], cfg, audit=sizing)
     checked_at = at
     latest_error = None
     if latest and utcnow() >= expires:
@@ -481,6 +570,7 @@ def run_scenario(scenario, providers, workdir):
             qty=sized["shares"],
             limit_price=size.limit_price,
             reference_price=size.reference_price,
+            analysis_entry_price=size.analysis_entry_price,
             notional=sized["notional"],
             conviction=size.conviction,
         )
@@ -528,19 +618,20 @@ def run_scenario(scenario, providers, workdir):
         evidence=pack.content,
         result=result,
         attempts=audit["attempts"],
+        sizing=sizing,
         risk=risk,
         orders=[],
         fills=[],
     )
 
 
-def main():
-    workdir = Path(sys.argv[1]).resolve()
+def main(workdir=None):
+    workdir = Path(workdir or sys.argv[1]).resolve()
     os.environ["TRADER_STATE_DIR"] = str(workdir / "isolated-state")
     scenario = Scenario.model_validate_json((workdir / "request.json").read_text(encoding="utf-8"))
     try:
-        with open_alpaca() as client:
-            response = run_scenario(scenario, AlpacaReadOnly(client), workdir)
+        with open_alpaca() as client, ExitStack() as cleanup:
+            response = run_scenario(scenario, AlpacaReadOnly(client), workdir, cleanup=cleanup)
     except ScenarioError as exc:
         response = {"error": str(exc)}
     (workdir / "response.json").write_text(json.dumps(response, allow_nan=False), encoding="utf-8")

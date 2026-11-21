@@ -309,9 +309,14 @@ class Council:
             if result["reason_codes"] or deadline.expired():
                 result["reason_codes"] = result["reason_codes"] or ["DEADLINE"]
                 return self._finish(run_id, result)
+            self.guard.prepare(datetime.fromisoformat(pack.content["as_of"].replace("Z", "+00:00")))
             members_deadline = deadline.child(self.cfg.council.member_seconds)
             futures = {}
             for role in ROLES:
+                if members_deadline.expired():
+                    result["reason_codes"].append(f"{role}:PREPARE_DEADLINE")
+                    futures[role] = None
+                    continue
                 try:
                     futures[role] = self._prepare(run_id, role, pack, members_deadline)
                 except Exception as exc:

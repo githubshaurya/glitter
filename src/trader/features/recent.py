@@ -53,26 +53,52 @@ def recent_context(minutes, as_of, feed):
     return value, end, quality, "OK" if len(rows) == 10 and known == 10 else "INCOMPLETE"
 
 
-def write_recent(features, symbol, minutes, as_of, feed, *, intraday_setup=False):
+def recent_observations(symbol, minutes, as_of, feed, *, intraday_setup=False):
     context, end, quality, status = recent_context(minutes, as_of, feed)
+    yield "symbol", symbol, "recent_price_10m", context, end, quality, status
     if intraday_setup:
-        from trader.features.intraday import write_intraday_setup
+        from trader.features.intraday import analyze_window
 
-        write_intraday_setup(features, symbol, context, end, as_of, quality)
-    features.write("symbol", symbol, "recent_price_10m", context, end, as_of, quality=quality, status=status)
+        setup = analyze_window(context)
+        yield "symbol", symbol, "intraday_setup_1m", setup, end, quality, "OK" if setup is not None else "MISSING"
     for window in (5, 10):
         for metric in ("return", "volume", "range_bps"):
             value = context["windows"][f"{window}m"].get(metric)
-            features.write(
-                "symbol",
-                symbol,
-                f"recent_{metric}_{window}m",
-                value,
-                end,
-                as_of,
-                quality=quality,
-                status="OK" if value is not None else "MISSING",
-            )
+            yield ("symbol", symbol, f"recent_{metric}_{window}m", value, end, quality,
+                   "OK" if value is not None else "MISSING")
+
+
+def write_recent(features, symbol, minutes, as_of, feed, *, intraday_setup=False):
+    observations = list(recent_observations(symbol, minutes, as_of, feed, intraday_setup=intraday_setup))
+    features.write_observations(observations, as_of)
+
+
+def first_missing_minute(features, symbols, as_of, feed):
+    from sqlalchemy import select
+
+    from trader.features.models import Coverage, MarketSession
+    from trader.store.repo import aware
+
+    end = as_of.replace(second=0, microsecond=0)
+    with features.store.session() as db:
+        session = db.scalar(select(MarketSession).where(
+            MarketSession.open < end, MarketSession.close >= end, MarketSession.known_at <= as_of,
+        ).order_by(MarketSession.known_at.desc()).limit(1))
+        if session is None:
+            return None
+        cursor = max(aware(session.open), end - timedelta(minutes=10))
+        covered = {(symbol, aware(stamp)) for symbol, stamp in db.execute(select(
+            Coverage.symbol, Coverage.event_time,
+        ).where(
+            Coverage.feed == feed, Coverage.symbol.in_(symbols), Coverage.event_time >= cursor,
+            Coverage.event_time < end, Coverage.known_at <= as_of,
+            Coverage.status.in_(("VERIFIED_BAR", "VERIFIED_NONE")),
+        ))}
+        while cursor < end:
+            if any((symbol, cursor) not in covered for symbol in symbols):
+                return cursor
+            cursor += timedelta(minutes=1)
+    return None
 
 
 def refresh_recent_from_store(features, symbols, as_of, feed, *, intraday_setup=False):
@@ -102,21 +128,24 @@ def refresh_recent_from_store(features, symbols, as_of, feed, *, intraday_setup=
                 MarketBar.event_time < end,
                 MarketBar.known_at <= as_of,
             )
-            .order_by(MarketBar.known_at, MarketBar.record_id)
+            .order_by(MarketBar.revision_rank, MarketBar.known_at, MarketBar.record_id)
         ).all()
         coverage = session.scalars(
             select(Coverage)
             .where(
                 Coverage.symbol.in_(symbols),
+                Coverage.feed == feed,
                 Coverage.event_time >= start,
                 Coverage.event_time < end,
                 Coverage.known_at <= as_of,
             )
-            .order_by(Coverage.known_at, Coverage.record_id)
+            .order_by(Coverage.status == "VERIFIED_BAR", Coverage.status == "VERIFIED_NONE",
+                      Coverage.known_at, Coverage.record_id)
         ).all()
         values = {(b.symbol, aware(b.event_time)): b.value for b in bars}
         statuses = {(b.symbol, aware(b.event_time)): b.status for b in coverage}
         first_unverified = None
+        observations = []
         for symbol in symbols:
             minutes = []
             cursor = start
@@ -126,5 +155,6 @@ def refresh_recent_from_store(features, symbols, as_of, feed, *, intraday_setup=
                     first_unverified = cursor
                 minutes.append((cursor, values.get((symbol, cursor)) if status == "VERIFIED_BAR" else None, status))
                 cursor += timedelta(minutes=1)
-            write_recent(features, symbol, minutes, as_of, feed, intraday_setup=intraday_setup)
+            observations.extend(recent_observations(symbol, minutes, as_of, feed, intraday_setup=intraday_setup))
+        features.write_observations(observations, as_of)
         return first_unverified

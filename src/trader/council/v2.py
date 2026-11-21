@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from trader.council.evidence import BASE_FIELDS, MARKET_FIELDS, PORTFOLIO_FIELDS, ROLE_FIELDS
+from trader.council.options import size_executable_choices
+from trader.council.sizing import entry_caps, order_prices, sellable_shares
 from trader.features.bands import BANDS
 
 SIGNALS = ("TECHNICAL", "NEWS")
@@ -131,16 +133,19 @@ def schema_for(role):
 
 
 def row_at(content, path):
-    result = content
-    for part in path.split("."):
-        result = result[part]
+    group, _, field = path.partition(".")
+    if group == "symbols":
+        symbol, _, field = field.rpartition(".")
+        result = content[group][symbol][field]
+    else:
+        result = content[group][field]
     if not isinstance(result, dict) or "status" not in result:
         raise KeyError(path)
     return result
 
 
 def legal_path(role, path):
-    parts = path.split(".")
+    group, _, field = path.partition(".")
     extras = {
         "ema_gap_bps_15m",
         "ret_5m",
@@ -154,11 +159,12 @@ def legal_path(role, path):
         "news_effective_sentiment",
         "volz_tod_15m",
     }
-    if len(parts) == 3 and parts[0] == "symbols":
-        return parts[2] in ROLE_FIELDS.get(role.lower(), BASE_FIELDS) | extras
-    return len(parts) == 2 and (
-        (parts[0] == "portfolio" and parts[1] in PORTFOLIO_FIELDS)
-        or (parts[0] == "market" and parts[1] in MARKET_FIELDS)
+    if group == "symbols":
+        symbol, _, name = field.rpartition(".")
+        return bool(symbol) and name in ROLE_FIELDS.get(role.lower(), BASE_FIELDS) | extras
+    return (
+        (group == "portfolio" and field in PORTFOLIO_FIELDS)
+        or (group == "market" and field in MARKET_FIELDS)
     )
 
 
@@ -166,7 +172,7 @@ def item_for(report, symbol):
     return next(x for x in report["symbols"] if x["symbol"] == symbol)
 
 
-def validate_report(role, raw, pack, floor, cfg, run_id):
+def validate_report(role, raw, pack, floor, cfg, run_id, *, distinct_technical_families=False):
     cls = SignalReport if role in SIGNALS else GateReport if role in GATES else TiltReport
     result = cls.model_validate_json(raw).model_dump()
     if result["run_id"] != run_id or result["role"] != role:
@@ -184,6 +190,9 @@ def validate_report(role, raw, pack, floor, cfg, run_id):
                     raise KeyError("duplicate evidence path")
                 if not legal_path(role, ref["path"]):
                     raise KeyError(ref["path"])
+                scope, _, _ = ref["path"].rpartition(".")
+                if scope.startswith("symbols.") and scope != f"symbols.{item['symbol']}":
+                    raise KeyError(ref["path"])
                 row = row_at(pack.content, ref["path"])
                 if row["status"] not in ("OK", "PROVISIONAL") or band_of(ref["path"], row) != ref["band"]:
                     raise KeyError(ref["path"])
@@ -192,11 +201,15 @@ def validate_report(role, raw, pack, floor, cfg, run_id):
                 result["evidence_stripped"] += 1
         item["evidence"] = supported
         base = item_for(floor, item["symbol"])
+        direction_conflict = False
         if role in SIGNALS:
             before, origin = item["signal"]["score"], base["signal"]["score"]
             bound = cfg.council_v2.llm_adjust_bound
             after = max(origin - bound, min(origin + bound, before)) if bound is not None else before
             after = max(-1, min(1, after))
+            direction_conflict = item["signal"]["state"] == "SIGNAL" and before * after < 0
+            if direction_conflict:
+                after = 0.0
             item["signal"]["score"] = after
             result["adjustments"][item["symbol"]] = dict(
                 code_floor_score=origin,
@@ -204,8 +217,18 @@ def validate_report(role, raw, pack, floor, cfg, run_id):
                 final_score=after,
                 adjustment_delta=after - origin,
                 clamped=not same(after, before),
+                direction_conflict=direction_conflict,
             )
-        if len(supported) < cfg.council_v2.min_support[role]:
+        family = {
+            "ema_gap_bps_15m": "trend", "macd_hist_15m": "trend",
+            "rsi14_15m": "momentum", "recent_return_5m": "momentum", "recent_return_10m": "momentum",
+            "ret_60m": "momentum", "vwap_dev_session": "price_location",
+            "relstr_spy_60m": "relative_strength", "intraday_setup_1m": "setup",
+        }
+        support_count = len(supported)
+        if role == "TECHNICAL" and distinct_technical_families:
+            support_count = len({family.get(ref["path"].split(".")[-1]) for ref in supported} - {None})
+        if direction_conflict or support_count < cfg.council_v2.min_support[role]:
             if role in SIGNALS:
                 item["signal"] = dict(state="NO_SIGNAL", score=0.0, confidence=0.0, horizon="INTRADAY")
             else:
@@ -217,6 +240,8 @@ def validate_report(role, raw, pack, floor, cfg, run_id):
                 item["gate"] = deepcopy(base["gate"])
             item["gate"]["size_multiplier"] = min(item["gate"]["size_multiplier"], base["gate"]["size_multiplier"])
     if role == "REGIME":
+        result["market_regime"] = floor.get("market_regime")
+        result["high_volatility"] = floor.get("high_volatility", False)
         order = {"RISK_OFF": 0, "NEUTRAL": 1, "RISK_ON": 2}
         if order[result["risk_appetite"]] > order[floor["risk_appetite"]]:
             result["risk_appetite"] = floor["risk_appetite"]
@@ -243,23 +268,17 @@ def feasibility(content, cfg):
     result = {}
     p, market = content["portfolio"], content["market"]
     for symbol, rows in content["symbols"].items():
-        held, sellable = number(rows, "position_qty"), number(rows, "sellable_qty")
-        equity, buying, headroom = (number(p, n) for n in ("equity", "buying_power", "aggregate_headroom_usd"))
-        position = number(rows, "position_value_usd")
-        capacity = (
-            0
-            if any(v is None for v in (equity, buying, headroom, position))
-            else max(
-                0,
-                min(
-                    cfg.risk.max_order_notional,
-                    cfg.risk.max_position_notional - position,
-                    equity * cfg.risk.max_position_pct_equity / 100 - position,
-                    buying,
-                    headroom,
-                ),
-            )
-        )
+        held = number(rows, "position_qty", 0)
+        sellable = sellable_shares(rows)
+        try:
+            capacity = max(Decimal(0), min(entry_caps(rows, p, cfg).values()))
+        except ValueError:
+            capacity = Decimal(0)
+        try:
+            limit, _ = order_prices(rows, "buy", cfg)
+            can_buy = capacity >= limit
+        except ValueError:
+            can_buy = False
         phase, close = value(market, "session_phase"), number(market, "minutes_to_close")
         reason = (
             "HALT"
@@ -275,12 +294,12 @@ def feasibility(content, cfg):
             )
         )
         result[symbol] = dict(
-            held_qty=str(held or 0),
-            sellable_qty=str(sellable or 0),
-            can_buy=capacity >= max(1, number(rows, "mid_px", 1)),
-            can_buy_reasons=[] if capacity >= max(1, number(rows, "mid_px", 1)) else ["NO_HEADROOM_OR_DATA"],
-            can_sell=sellable is not None and sellable > 0,
-            can_sell_reasons=[] if sellable and sellable > 0 else ["NO_SELLABLE_INVENTORY"],
+            held_qty=str(held),
+            sellable_qty=str(sellable),
+            can_buy=can_buy,
+            can_buy_reasons=[] if can_buy else ["NO_HEADROOM_OR_DATA"],
+            can_sell=sellable > 0,
+            can_sell_reasons=[] if sellable else ["NO_SELLABLE_INVENTORY"],
             entry_window_open=not reason,
             entry_window_reason=reason,
             max_new_notional_usd=str(capacity),
@@ -340,6 +359,8 @@ def code_floors(pack, cfg, run_id):
                 )
                 item["horizon_conflict"] = conflict
                 report["data_available"] = report.get("data_available", True) and available
+                if not available:
+                    report.setdefault("unavailable_symbols", []).append(symbol)
             elif role == "NEWS":
                 meta = c.get("meta", {}).get("news", {}).get(symbol, {})
                 fresh = meta.get("state") == "FRESH"
@@ -390,7 +411,10 @@ def code_floors(pack, cfg, run_id):
             report["symbols"].append(item)
         if role == "REGIME":
             label = value(c["market"], "regime_label")
-            report["data_available"] = label is not None and number(c["market"], "spy_vol_regime_ratio") is not None
+            vol = number(c["market"], "spy_vol_regime_ratio")
+            report["data_available"] = label is not None and vol is not None
+            report["market_regime"] = label
+            report["high_volatility"] = label == "HIGH_VOL" or (vol is not None and vol >= 1.3)
             report["risk_appetite"] = (
                 "RISK_OFF"
                 if label in ("DOWNTREND", "HIGH_VOL")
@@ -426,17 +450,21 @@ def code_floors(pack, cfg, run_id):
     return reports
 
 
-def evaluate(symbol, reports, tilt, cfg, *, held=False, skeptic=None):
+def evaluate(symbol, reports, tilt, cfg, *, held=False, can_short=False, short_held=False, skeptic=None):
     conf = cfg.council_v2
     signals = []
     for role in SIGNALS:
         if role in reports:
             sig = item_for(reports[role], symbol)["signal"]
-            if sig["state"] == "SIGNAL":
-                signals.append(dict(role=role, eff=sig["score"] * sig["confidence"]))
+            effective = sig["score"] * sig["confidence"]
+            if sig["state"] == "SIGNAL" and effective != 0:
+                signals.append(dict(role=role, eff=effective))
     denominator = sum(conf.signal_weights[x["role"]] for x in signals)
     score = sum(conf.signal_weights[x["role"]] * x["eff"] for x in signals) / denominator if denominator else 0.0
-    threshold = conf.enter_threshold + conf.tilt_shift[tilt]
+    regime = reports.get("REGIME", {})
+    high_volatility = regime.get("high_volatility", False)
+    entry_tilt = "RISK_OFF" if high_volatility else tilt
+    threshold = conf.enter_threshold + conf.tilt_shift[entry_tilt]
     gates = [dict(role=r, **item_for(reports[r], symbol)["gate"]) for r in GATES if r in reports]
     blockers = ["GATE_BLOCK:" + g["role"] for g in gates if g["state"] == "BLOCK"]
     opposing = any(s["eff"] <= conf.opposing_eff for s in signals)
@@ -447,56 +475,84 @@ def evaluate(symbol, reports, tilt, cfg, *, held=False, skeptic=None):
     if any(x["severity"] == 3 for x in objections):
         blockers.append("SKEPTIC_BLOCK")
     entry = score >= threshold and support and not opposing and not blockers
+    trend = regime.get("market_regime")
+    short_tilt = "RISK_OFF" if high_volatility or trend == "UPTREND" else "RISK_ON" if trend == "DOWNTREND" else "NEUTRAL"
+    short_threshold = conf.enter_threshold + conf.tilt_shift[short_tilt]
+    short_support = (
+        any(-s["eff"] >= conf.strong_eff for s in signals)
+        or sum(-s["eff"] >= conf.moderate_eff for s in signals) >= 2
+    )
+    short_opposing = any(-s["eff"] <= conf.opposing_eff for s in signals)
+    short_ok = (can_short and -score >= short_threshold and short_support
+                and not short_opposing and not blockers)
+    cover_ok = short_held and score >= conf.exit_threshold
+    entry = entry and not short_held
     reasons = list(blockers)
-    if opposing:
+    has_conflict = short_opposing if score < 0 and (can_short or held) else opposing
+    if has_conflict:
         reasons.append("CONFLICT")
-    if not entry and not reasons:
-        reasons.append("NO_SIGNAL_ABOVE_THRESHOLD")
+    bearish = score <= -conf.exit_threshold
+    exit_ok = held and bearish
+    if exit_ok:
+        reasons.append("EXIT_SIGNAL")
+    elif short_ok:
+        reasons.append("SHORT_ENTRY_SIGNAL")
+    elif cover_ok:
+        reasons.append("COVER_SIGNAL")
+    elif not entry and not reasons:
+        if (score >= threshold and not support) or (can_short and -score >= short_threshold and not short_support):
+            reasons.append("INSUFFICIENT_SIGNAL_SUPPORT")
+        else:
+            reasons.append("NO_SIGNAL_ABOVE_THRESHOLD")
     conviction = (
         "HIGH" if score >= conf.conviction_cuts["HIGH"] else "MED" if score >= conf.conviction_cuts["MED"] else "LOW"
     )
     mult = min([g["size_multiplier"] for g in gates] + [1.0])
-    if any(x["severity"] in (1, 2) for x in objections):
+    skeptical_caution = any(x["severity"] in (1, 2) for x in objections)
+    if skeptical_caution:
         mult = min(mult, 0.5)
     return dict(
         symbol=symbol,
-        decision="ENTER" if entry else "EXIT" if held and -score >= conf.exit_threshold else "NO_ENTRY",
+        decision="ENTER" if entry else "EXIT" if exit_ok else "SHORT" if short_ok else "COVER" if cover_ok else "NO_ENTRY",
         entry_ok=entry,
-        exit_ok=held and -score >= conf.exit_threshold,
+        exit_ok=exit_ok,
+        short_ok=short_ok,
+        cover_ok=cover_ok,
         conviction=conviction if entry else None,
         S=score,
         threshold_eff=threshold,
+        exit_threshold=-conf.exit_threshold,
+        short_threshold=-short_threshold,
+        cover_threshold=conf.exit_threshold,
         tilt=tilt,
+        short_tilt=short_tilt,
+        high_volatility=high_volatility,
         signals=signals,
         gates=gates,
         size_mult=mult,
+        skeptical_caution=skeptical_caution,
         entry_checks={
             "score_threshold": score >= threshold,
             "signal_support": support,
             "no_opposition": not opposing,
             "gates_pass": not blockers,
         },
+        short_checks={
+            "entry_capacity": can_short,
+            "score_threshold": -score >= short_threshold,
+            "signal_support": short_support,
+            "no_opposition": not short_opposing,
+            "gates_pass": not blockers,
+        },
+        exit_checks={"sellable_inventory": held, "bearish_threshold": bearish},
         blockers=blockers,
         reasons=reasons,
         near_miss="needs one effective signal >= 0.50, or two >= 0.30, and weighted score >= threshold",
     )
 
 
-def size_with_gate_reduction(pack, decisions, cfg):
-    """Existing sizing formula stays intact; an optional gate can only reduce its result."""
-    from dataclasses import replace
-
-    from trader.council.sizing import size_candidates
-
-    sized = size_candidates(pack, decisions, cfg)
-    factors = {(d["symbol"], d["action"]): max(0, min(1, d.get("size_multiplier", 1))) for d in decisions}
-    result = []
-    for order in sized:
-        factor = factors[(order.symbol, order.side)] if order.side == "buy" else 1
-        qty = int(Decimal(order.qty) * Decimal(str(factor)))
-        if qty > 0:
-            result.append(replace(order, qty=qty, notional=float(Decimal(qty) * Decimal(str(order.limit_price)))))
-    return result
+def size_with_gate_reduction(pack, decisions, cfg, *, audit=None, allow_simulated_short=False):
+    return size_executable_choices(pack, decisions, cfg, audit=audit, allow_simulated_short=allow_simulated_short)
 
 
 def symbol_stage(cfg, symbol):

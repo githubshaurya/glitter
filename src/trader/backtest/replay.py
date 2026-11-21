@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
+from math import isfinite
 
 
 def stamp(value):
@@ -22,13 +23,65 @@ class ReplayLedger:
         self.slippage_bps = slippage_bps
         self.halted = False
         self.equity_samples = []
+        self.last_session_close = None
+        self.corporate_action_ids = []
+        self.dividend_receivables = []
+        self.corporate_actions_through = None
 
     @property
     def equity(self):
-        return self.cash + sum(
+        return self.cash + sum((Decimal(row["amount"]) for row in self.dividend_receivables), Decimal(0)) + sum(
             (Decimal(p["qty"]) * Decimal(str(self.marks.get(s, p["avg_price"]))) for s, p in self.positions.items()),
             Decimal(0),
         )
+
+    def apply_corporate_actions(self, actions, session_date):
+        applied = set(self.corporate_action_ids)
+        positions, marks = deepcopy(self.positions), self.marks.copy()
+        receivables = list(self.dividend_receivables)
+        pending_symbols = {row["symbol"] for row in self.orders if row["status"] in ("new", "partial")}
+        cancel = set()
+        after = self.corporate_actions_through
+        for action in sorted(actions, key=lambda row: (row["date"], row["type"] != "split", row["id"])):
+            action_id, symbol = action["id"], action["symbol"]
+            effective = action["date"]
+            in_window = after < effective <= session_date if after else effective == session_date
+            if not in_window or action_id in applied or symbol not in positions and symbol not in pending_symbols:
+                continue
+            position = positions.get(symbol)
+            if action["type"] == "split":
+                old_rate, new_rate = Decimal(str(action["old_rate"])), Decimal(str(action["new_rate"]))
+                if not all(rate.is_finite() and rate > 0 for rate in (old_rate, new_rate)):
+                    raise ValueError("split ratio unavailable")
+                if position:
+                    numerator = Decimal(position["qty"]) * new_rate
+                    quantity = numerator / old_rate
+                    if numerator % old_rate:
+                        raise ValueError(f"fractional split entitlement needs cash-in-lieu for {symbol}")
+                    adjustment = old_rate / new_rate
+                    position.update(qty=int(quantity), avg_price=float(Decimal(str(position["avg_price"])) * adjustment))
+                    if symbol in marks:
+                        marks[symbol] = float(Decimal(str(marks[symbol])) * adjustment)
+                cancel.add(symbol)
+            elif action["type"] == "cash_dividend":
+                if position:
+                    rate = Decimal(str(action["rate"]))
+                    payable = action.get("payable_date")
+                    if not rate.is_finite() or rate < 0 or not payable:
+                        raise ValueError("dividend rate or payment date unavailable")
+                    receivables.append(dict(amount=str(rate * position["qty"]), payable_date=payable))
+                cancel.add(symbol)
+            else:
+                raise ValueError(f"unmodeled corporate action for {symbol}")
+            applied.add(action_id)
+        self.positions, self.marks = positions, marks
+        self.corporate_action_ids = sorted(applied)
+        self.cash += sum((Decimal(row["amount"]) for row in receivables if row["payable_date"] <= session_date), Decimal(0))
+        self.dividend_receivables = [row for row in receivables if row["payable_date"] > session_date]
+        self.corporate_actions_through = session_date
+        for order in self.orders:
+            if order["symbol"] in cancel and order["status"] in ("new", "partial"):
+                order.update(status="canceled", unfilled_reason="corporate_action")
 
     @property
     def reserved(self):
@@ -109,6 +162,7 @@ class ReplayLedger:
                     symbol=symbol,
                     side=order["side"],
                     qty=qty,
+                    position_after=new_qty,
                     price=price,
                     t=(at + timedelta(minutes=1)).isoformat(),
                     simulation=True,
@@ -121,6 +175,43 @@ class ReplayLedger:
             if order["status"] in ("new", "partial") and through >= stamp(order["expires_at"]):
                 order["status"] = "expired"
         return emitted
+
+    def close_session(self, bars, *, close):
+        """Settle an intraday session with a volume-bounded closing-bar price proxy."""
+        if self.last_session_close and close <= stamp(self.last_session_close):
+            return
+        final_minute = close - timedelta(minutes=1)
+        self.advance(bars, through=final_minute)
+        for order in self.orders:
+            if order["status"] in ("new", "partial"):
+                order["status"] = "canceled"
+        closing = {bar["symbol"]: bar for bar in bars if stamp(bar["t"]) == final_minute}
+        self.advance(bars, through=close)
+        for symbol, position in list(self.positions.items()):
+            requested = position["qty"]
+            bar = closing.get(symbol)
+            usable = bar and isfinite(bar["c"]) and bar["c"] > 0 and isfinite(bar["v"]) and bar["v"] > 0
+            quantity = min(requested, int(bar["v"] * self.participation)) if usable else 0
+            price = round(bar["c"] * (1 - self.slippage_bps / 10000), 4) if quantity else None
+            order = dict(
+                id=f"sim-{len(self.orders) + 1}", symbol=symbol, side="sell", qty=requested,
+                limit_price=None, submitted_at=final_minute.isoformat(), expires_at=close.isoformat(),
+                status="filled" if quantity == requested else "canceled", filled_qty=quantity, reason="session_cutoff",
+            )
+            self.orders.append(order)
+            if quantity < requested:
+                order["unfilled_reason"] = "insufficient_bar_participation" if usable else "missing_final_bar"
+            if quantity:
+                self.cash += Decimal(quantity) * Decimal(str(price))
+                self.fills.append(dict(order_id=order["id"], symbol=symbol, side="sell", qty=quantity,
+                                       position_after=requested - quantity, price=price, t=close.isoformat(),
+                                       simulation=True, reason="session_cutoff"))
+            if quantity == requested:
+                del self.positions[symbol]
+            else:
+                position["qty"] -= quantity
+        self.equity_samples.append(dict(t=close.isoformat(), equity=float(self.equity)))
+        self.last_session_close = close.isoformat()
 
     def to_dict(self):
         return deepcopy(
@@ -136,6 +227,10 @@ class ReplayLedger:
                 slippage_bps=self.slippage_bps,
                 halted=self.halted,
                 equity_samples=self.equity_samples,
+                last_session_close=self.last_session_close,
+                corporate_action_ids=self.corporate_action_ids,
+                dividend_receivables=self.dividend_receivables,
+                corporate_actions_through=self.corporate_actions_through,
             )
         )
 
@@ -193,6 +288,8 @@ def run_cached_sessions(
     progress=None,
     execution_quote=None,
     measure_latency=False,
+    holding_period="intraday",
+    corporate_actions=None,
 ):
     """Replay cached historical observations; only factory may perform model I/O. No broker client exists here."""
     import hashlib
@@ -230,6 +327,24 @@ def run_cached_sessions(
 
     data_dir, output_dir = Path(data_dir), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if holding_period not in ("intraday", "overnight"):
+        raise ValueError("holding_period must be intraday or overnight")
+    saved = output_dir / "progress.json"
+    state = (
+        json.loads(saved.read_text())
+        if saved.exists()
+        else dict(cycles=[], ledger=None, last_as_of=None, equity_samples=[], holding_period=holding_period)
+    )
+    if state.get("holding_period", "overnight") != holding_period:
+        raise ValueError("Choose a new output directory to change the replay's holding period.")
+    state["holding_period"] = holding_period
+    action_file = data_dir / "corporate-actions.json"
+    if corporate_actions is None and action_file.exists():
+        corporate_actions = json.loads(action_file.read_text(encoding="utf-8"))
+    actions_hash = digest(corporate_actions) if corporate_actions is not None else None
+    if state.get("corporate_actions_hash") not in (None, actions_hash):
+        raise ValueError("Choose a new output directory for a revised corporate action snapshot.")
+    state["corporate_actions_hash"] = actions_hash
     old_state = os.environ.get("TRADER_STATE_DIR")
     os.environ["TRADER_STATE_DIR"] = str((output_dir / "isolated-state").resolve())
     cfg = cfg.model_copy(deep=True)
@@ -244,12 +359,6 @@ def run_cached_sessions(
     store.init_schema()
     fs = FeatureStore(store)
     worker = FeatureWorker(fs, cfg)
-    saved = output_dir / "progress.json"
-    state = (
-        json.loads(saved.read_text())
-        if saved.exists()
-        else dict(cycles=[], ledger=None, last_as_of=None, equity_samples=[])
-    )
     ledger = ReplayLedger.from_dict(state["ledger"]) if state["ledger"] else ReplayLedger()
     # Keep the first committed observation if an older runner re-appended a past close.
     pinned_samples: dict[datetime, dict] = {}
@@ -260,6 +369,8 @@ def run_cached_sessions(
     first_day = days[0]
     manifest = dict(
         mode="HISTORICAL_SIMULATION",
+        holding_period=holding_period,
+        corporate_actions_hash=actions_hash,
         days=days,
         slots=slots,
         symbol="NVDA",
@@ -271,6 +382,8 @@ def run_cached_sessions(
             candles="unadjusted, completed bars only; historical revisions may exist",
             known_at="synthetic availability at replay timestamp, not a recovered original collection timestamp",
             fills="next completed minute only; limit-touch simulation; 1bp adverse open slippage capped at limit; 1% bar participation",
+            session_exit="volume-bounded final minute close proxy with adverse slippage"
+            if holding_period == "intraday" else "positions can carry across calendar sessions",
             latency="actual inference wall time shifts simulated submission; historical quote refreshed before risk check"
             if measure_latency
             else "accelerated fixed-time simulation; inference latency excluded",
@@ -291,6 +404,8 @@ def run_cached_sessions(
         temp.replace(saved)
 
     try:
+        if holding_period == "intraday" and state.get("stop_reason") and not state.get("stop_after_close"):
+            return dict(cycles=cycles, ledger=ledger.to_dict(), stop_reason=state["stop_reason"], metrics=funnel(cycles))
         fs.calendar(list(sessions.values()), min(r["open"] for r in sessions.values()) - timedelta(days=1))
         # Warmup is known by the first evaluated open; current/future sessions are never preloaded.
         for date, session in sorted(sessions.items()):
@@ -312,16 +427,36 @@ def run_cached_sessions(
             session = sessions[date]
             if session["close"] in pinned_samples:
                 continue  # This session's ingestion and closing mark were already checkpointed.
+            if holding_period == "overnight":
+                try:
+                    pending = any(order["status"] in ("new", "partial") for order in ledger.orders)
+                    if corporate_actions is None and (ledger.positions or pending):
+                        raise ValueError("overnight corporate action coverage is unavailable")
+                    if ledger.corporate_actions_through is None:
+                        ledger.corporate_actions_through = max((
+                            day for day in days if day < date and sessions[day]["close"] in pinned_samples
+                        ), default=None)
+                    ledger.apply_corporate_actions(corporate_actions or [], date)
+                except (ValueError, KeyError, ArithmeticError) as exc:
+                    state.update(stop_reason="corporate_action_unverified", corporate_action_error=str(exc))
+                    checkpoint()
+                    export_journal(store, output_dir / "journal")
+                    return dict(cycles=cycles, ledger=ledger.to_dict(), stop_reason=state["stop_reason"],
+                                corporate_action_error=state["corporate_action_error"], metrics=funnel(cycles))
             daybars = json.loads((data_dir / f"bars-{date}.json").read_text())
             allbars = [dict(**b, symbol=s) for s, rows in daybars.items() for b in rows]
             day_last_equity = state.setdefault("day_start_equity", {}).setdefault(date, float(ledger.equity))
             cursor = session["open"]
             for local in slots:
+                if state.get("stop_after_close") == date:
+                    break
                 at = (
                     datetime.fromisoformat(date + "T" + local + ":20")
                     .replace(tzinfo=ZoneInfo("America/New_York"))
                     .astimezone(UTC)
                 )
+                if not session["open"] <= at < session["close"] - timedelta(minutes=1):
+                    continue
                 end = at.replace(second=0, microsecond=0)
                 if state["last_as_of"] and at <= stamp(state["last_as_of"]):
                     cursor = end
@@ -435,6 +570,7 @@ def run_cached_sessions(
                         qty=order.qty,
                         limit_price=order.limit_price,
                         reference_price=order.reference_price,
+                        analysis_entry_price=order.analysis_entry_price,
                         notional=order.notional,
                         conviction=order.conviction,
                     )
@@ -565,6 +701,10 @@ def run_cached_sessions(
                 )
                 if reason:
                     state["stop_reason"] = reason
+                    if holding_period == "intraday":
+                        state["stop_after_close"] = date
+                        checkpoint()
+                        break
                     checkpoint()
                     export_journal(store, output_dir / "journal")
                     return dict(cycles=cycles, ledger=ledger.to_dict(), stop_reason=reason, metrics=funnel(cycles))
@@ -581,10 +721,24 @@ def run_cached_sessions(
                 session["close"] + timedelta(seconds=20),
                 feed=cfg.data_feed,
             )
-            ledger.advance(allbars, through=session["close"])
+            if holding_period == "intraday":
+                ledger.close_session(allbars, close=session["close"])
+                if ledger.positions:
+                    state["stop_reason"] = "session_closeout_incomplete"
+                    state.pop("stop_after_close", None)
+                    checkpoint()
+                    export_journal(store, output_dir / "journal")
+                    return dict(cycles=cycles, ledger=ledger.to_dict(), stop_reason=state["stop_reason"], metrics=funnel(cycles))
+            else:
+                ledger.advance(allbars, through=session["close"])
             samples.append(dict(t=session["close"].isoformat(), equity=float(ledger.equity)))
+            stopped_at_close = state.get("stop_after_close") == date
+            if stopped_at_close:
+                state.pop("stop_after_close")
             checkpoint()
             export_journal(store, output_dir / "journal")
+            if stopped_at_close:
+                return dict(cycles=cycles, ledger=ledger.to_dict(), stop_reason=state["stop_reason"], metrics=funnel(cycles))
             if progress:
                 progress(dict(phase="day_complete", day=date, equity=float(ledger.equity), fills=len(ledger.fills)))
         checkpoint()
@@ -612,7 +766,7 @@ def run_cached_sessions(
         closed = []
         for fill in ledger.fills:
             sign = 1 if fill["side"] == "buy" else -1
-            quantity += sign * fill["qty"]
+            quantity = fill.get("position_after", quantity + sign * fill["qty"])
             cashflow -= sign * fill["qty"] * fill["price"]
             if quantity == 0:
                 closed.append(cashflow)

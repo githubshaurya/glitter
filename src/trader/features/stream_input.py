@@ -5,11 +5,12 @@ from datetime import timedelta
 import pandas as pd
 
 from trader.events.payloads import BarSnap
+from trader.features.wakeup import CANDLES, notify
 
 MAX_EARLY_STREAM_SECS = 5
 
 
-def ingest_completed_bars(features, feed, rows, known_at):
+def ingest_completed_bars(features, feed, rows, known_at, *, live=False):
     for row in rows:
         if row["kind"] not in ("b", "u"):
             continue
@@ -37,5 +38,12 @@ def ingest_completed_bars(features, feed, rows, known_at):
         symbol = row["symbol"]
         # Preserve the raw receipt separately. A completed bar becomes usable at its exchange close.
         available_at = max(known_at, end)
-        features.ingest_minutes([symbol], start, end, {symbol: [bar]}, available_at, feed=feed)
+        rank = 2 if row["kind"] == "u" else int(live)
+        features.ingest_minutes(
+            [symbol], start, end, {symbol: [bar]}, available_at, feed=feed,
+            revision_rank=rank, source_event_id=row["event_key"],
+        )
         features.health("bars", available_at, True)
+        if live and row["kind"] == "b" and (known_at - end).total_seconds() <= 15:
+            with features.store.session() as session:
+                notify(session, CANDLES, f"{feed}|{symbol}|{end.isoformat()}")

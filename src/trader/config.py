@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     kafka_bootstrap: str = "localhost:9094"
     database_url: str = "postgresql+psycopg://trader:trader@localhost:5442/trader"
     trader_config_dir: str = "config"
+    trader_llm_quota_database_url: SecretStr | None = None
     log_level: str = "INFO"
     watchdog_ping_url: SecretStr | None = (
         None  # optional dead-man URL (e.g. healthchecks.io): its silence alerts you if the watchdog itself dies
@@ -38,13 +39,21 @@ class Settings(BaseSettings):
     service_name: str = "tradectl"
     execution_enabled: bool = False
     realtime_enabled: bool = False
+    pg_dispatch_enabled: bool = False
+    market_recovery_guard: bool = False
     managed_paper_enabled: bool = False
+    paper_fault_account: str = ""
+    paper_fault_order_id: str = ""
 
     # alpaca paper credentials (two accounts: live lane + baseline lane)
     alpaca_paper_key_id: SecretStr | None = None
     alpaca_paper_secret_key: SecretStr | None = None
     alpaca_baseline_key_id: SecretStr | None = None
     alpaca_baseline_secret_key: SecretStr | None = None
+    alpaca_history_key_id: SecretStr | None = None
+    alpaca_history_secret_key: SecretStr | None = None
+    alpaca_news_key_id: SecretStr | None = None
+    alpaca_news_secret_key: SecretStr | None = None
 
     # LLM profile names (the model is an input; see config/llm_profiles.yaml)
     llm_profile_live: str = "primary"
@@ -151,11 +160,15 @@ class FeatureConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     legacy_inline_indicators: bool = True
+    rolling_enabled: bool = True
+    continuous_news: bool = True
     poll_seconds: int = Field(60, ge=15)
     catchup_seconds: float = Field(8, gt=0, le=30)
     min_ok_fraction: float = Field(0.9, ge=0, le=1)
     history_days: int = Field(100, ge=63, le=180)
     symbol_batch_size: int = Field(20, ge=1, le=100)
+    cpu_workers: int = Field(2, ge=1, le=8)
+    cpu_min_symbols: int = Field(8, ge=2, le=100)
 
 
 class CouncilConfig(BaseModel):
@@ -193,6 +206,8 @@ class CouncilV2Config(BaseModel):
     )
     role_profiles: dict[str, str] = Field(default_factory=dict)
     phase_seconds: float = Field(75, gt=0, le=90)
+    compact_hosted_prompts: bool = False
+    async_hosted_transport: bool = False
     min_support: dict[str, int] = Field(
         default_factory=lambda: dict(TECHNICAL=2, NEWS=1, REGIME=1, LIQUIDITY=1, PORTFOLIO=1)
     )

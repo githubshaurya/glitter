@@ -37,6 +37,8 @@ def _canonical(lane: str, cmd: OrderCommandPayload) -> bytes:
         fields.extend([cmd.account_ref, cmd.valid_until.isoformat() if cmd.valid_until else None, cmd.risk_epoch])
     if cmd.protection is not None:
         fields.extend([cmd.protection.stop_price, cmd.protection.take_profit_price])
+    if cmd.analysis_entry_price is not None:
+        fields.extend(["analysis_entry_price", cmd.analysis_entry_price, cmd.valid_until.isoformat() if cmd.valid_until else None])
     return json.dumps(fields, separators=(",", ":")).encode()
 
 

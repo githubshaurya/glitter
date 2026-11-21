@@ -23,6 +23,7 @@ class SizedOrder:
     reference_price: float
     notional: float
     conviction: float
+    analysis_entry_price: float | None = None
 
 
 @dataclass
@@ -68,4 +69,4 @@ def size_order(
     qty = int(math.floor(target / px)) if px > 0 else 0
     if qty < 1:
         return SizingSkip(symbol, "position_at_cap_or_too_small")
-    return SizedOrder(symbol, "buy", qty, px, mid, round(qty * px, 2), conviction)
+    return SizedOrder(symbol, "buy", qty, px, mid, round(qty * px, 2), conviction, quote.ask)

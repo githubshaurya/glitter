@@ -1,6 +1,5 @@
 """Bounded broker ingestion. Only this code and FeatureWorker produce features."""
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from math import isfinite
@@ -8,6 +7,7 @@ from math import isfinite
 import structlog
 from sqlalchemy import select
 
+from trader.concurrency import BoundedPool, broker_reads
 from trader.deadline import Deadline, request_budget
 from trader.events.envelope import utcnow
 from trader.events.payloads import (
@@ -21,13 +21,15 @@ from trader.events.payloads import (
 )
 from trader.features.evidence import Assembler
 from trader.features.models import FeatureState, Gap, MarketSession, SourceHealth
-from trader.features.storage import FeatureStore
+from trader.features.storage import FeatureStore, bar_gap_scope
 from trader.features.worker import FeatureWorker
 from trader.risk.durable import ACTIVE, money
-from trader.store.extended import Reservation
+from trader.store.extended import ManagedBracket, Reservation
 from trader.store.repo import aware
 
 log = structlog.get_logger(__name__)
+_ACCOUNT_REFRESH = BoundedPool(2, "features-account")
+_ACCOUNT_READS = BoundedPool(8, "features-account-reads")
 
 
 def _two_sided(bid, ask):
@@ -35,8 +37,10 @@ def _two_sided(bid, ask):
 
 
 class Collector:
-    def __init__(self, ctx):
+    def __init__(self, ctx, *, offer_repair=None, rolling=False):
         self.ctx, self.fs = ctx, FeatureStore(ctx.store)
+        self.offer_repair = offer_repair
+        self.rolling = rolling
         self.realtime = ctx.cfg.council_v2.bar_close_deadline_seconds is not None
         self._recent_repair_end = None
         if self.realtime:
@@ -51,7 +55,7 @@ class Collector:
         with request_budget(deadline):
             bars = self.ctx.broker.bars_range(symbols, end - timedelta(minutes=60), end)
         at = utcnow()
-        self.fs.ingest_minutes(symbols, end - timedelta(minutes=60), end, bars, at, feed=self.ctx.cfg.data_feed)
+        self.fs.ingest_minutes(symbols, end - timedelta(minutes=60), end, bars, at, feed=self.ctx.cfg.data_feed, revision_rank=0)
         deadline.timeout_for(1)
         self.worker.compute(at)
         deadline.timeout_for(1)
@@ -62,24 +66,41 @@ class Collector:
 
         from trader.marketdata.archive import TickArchive
 
+        def streamed(row):
+            return QuoteSnap(
+                symbol=row.symbol, bid=row.payload.get("bp"), ask=row.payload.get("ap"),
+                ts=Timestamp(row.event_time_ns, tz="UTC").to_pydatetime(warn=False),
+            )
+
+        risk = self.ctx.cfg.risk
+        window = timedelta(seconds=max(0, risk.max_quote_age_seconds - risk.max_clock_skew_seconds))
+        archive = TickArchive(self.ctx.store, self.ctx.cfg.data_feed)
+        stream = {}
+        if self.rolling:
+            at = utcnow()
+            for row in archive.latest_stream_quotes(symbols, at - window, at):
+                quote = streamed(row)
+                if _two_sided(quote.bid, quote.ask):
+                    stream[row.symbol] = quote
+        missing = [symbol for symbol in symbols if symbol not in stream]
         try:
             with request_budget(deadline):
-                quotes = self.ctx.broker.latest_quotes(symbols)
+                rest = self.ctx.broker.latest_quotes(missing) if missing else {}
         except Exception:
             if not self.realtime:
                 self.fs.health("quotes", utcnow(), False)
                 return
-            quotes = {}
+            rest = {}
+        quotes = stream | rest
         observed = utcnow()
-        risk = self.ctx.cfg.risk
-        earliest = observed - timedelta(seconds=risk.max_quote_age_seconds - risk.max_clock_skew_seconds)
+        earliest = observed - window
         last = observed if self.realtime else observed + timedelta(seconds=1)
-        archive = TickArchive(self.ctx.store, self.ctx.cfg.data_feed)
         count = 0
+        updates = []
         with self.ctx.store.session():
             for symbol in symbols if self.realtime else quotes:
                 quote = quotes.get(symbol)
-                origin = "rest"
+                origin = "stream" if symbol in stream else "rest"
                 if self.realtime and (
                     quote is None or not quote.ts or not earliest <= quote.ts <= last
                     or not _two_sided(quote.bid, quote.ask)
@@ -87,58 +108,61 @@ class Collector:
                     row = archive.latest_stream_quote(symbol, earliest, observed)
                     quote = None
                     if row is not None:
-                        origin = row.origin
-                        quote = QuoteSnap(
-                            symbol=symbol, bid=row.payload.get("bp"), ask=row.payload.get("ap"),
-                            ts=Timestamp(row.event_time_ns, tz="UTC").to_pydatetime(warn=False),
-                        )
+                        origin, quote = row.origin, streamed(row)
                 ts = quote.ts if quote and quote.ts else observed
                 bid, ask = (quote.bid, quote.ask) if quote else (None, None)
-                valid = ts <= last and _two_sided(bid, ask)
+                valid = ts <= last and (not self.realtime or ts >= earliest) and _two_sided(bid, ask)
                 mid = (bid + ask) / 2 if valid else None
                 values = dict(
                     bid_px=bid, ask_px=ask, mid_px=mid,
                     spread_bps=(ask - bid) / mid * 10000 if mid else None,
                 )
                 for name, value in values.items():
-                    self.fs.write(
-                        "symbol", symbol, name, value, ts, observed,
-                        quality={"origin": origin, "feed": self.ctx.cfg.data_feed},
-                        status="OK" if valid else "MISSING",
-                    )
+                    updates.append(("symbol", symbol, name, value, ts,
+                                    {"origin": origin, "feed": self.ctx.cfg.data_feed}, "OK" if valid else "MISSING"))
                 count += valid
+            self.fs.write_observations(updates, observed)
             self.fs.health("quotes", observed, count == len(symbols) if self.realtime else True)
 
     def _read_account(self, deadline):
-        # The Alpaca adapter uses independent TradingClient and StockHistoricalDataClient sessions.
+        names = ("account", "positions", "open_orders", "clock")
+        if self.realtime:
+            return (*broker_reads(_ACCOUNT_READS, self.ctx.broker, deadline, [(name, ()) for name in names]), utcnow())
         with request_budget(deadline):
-            broker = self.ctx.broker
-            return broker.account(), broker.positions(), broker.open_orders(), broker.clock(), utcnow()
+            return (*(getattr(self.ctx.broker, name)() for name in names), utcnow())
 
     def _refresh_recent(self, symbols, deadline):
-        from trader.features.recent import refresh_recent_from_store
+        from trader.features.recent import first_missing_minute, refresh_recent_from_store
 
         at = utcnow()
         feed = self.ctx.cfg.data_feed
-        start = refresh_recent_from_store(self.fs, symbols, at, feed, intraday_setup=True)
+        start = (
+            first_missing_minute(self.fs, symbols, at, feed)
+            if self.rolling else refresh_recent_from_store(self.fs, symbols, at, feed, intraday_setup=True)
+        )
         end = at.replace(second=0, microsecond=0)
         if start is not None and self._recent_repair_end != end and not deadline.expired():
             # One batched attempt per minute covers absent or missing stream candles without polling healthy windows.
             self._recent_repair_end = end
-            self._bars(symbols, start, end, deadline.child(1))
-            refresh_recent_from_store(self.fs, symbols, utcnow(), feed, intraday_setup=True)
+            if self.offer_repair is not None:
+                self.offer_repair(symbols, start, end)
+            else:
+                self._bars(symbols, start, end, deadline.child(1))
+                refresh_recent_from_store(self.fs, symbols, utcnow(), feed, intraday_setup=True)
 
     def refresh(self, deadline=None):
         deadline = deadline or Deadline(self.ctx.cfg.features.catchup_seconds)
         symbols = sorted(set(self.ctx.cfg.symbols + [self.ctx.cfg.benchmark]))
         try:
             if self.realtime:
-                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="features-account") as pool:
-                    state = pool.submit(self._read_account, deadline)
+                state = _ACCOUNT_REFRESH.submit(self._read_account, deadline)
+                try:
                     if self.ctx.cfg.features.enabled:
                         self._refresh_recent(symbols, deadline)
                     self._refresh_quotes(symbols, deadline)
-                    account, positions, orders, clock, observed = state.result()
+                    account, positions, orders, clock, observed = state.result(timeout=deadline.remaining())
+                finally:
+                    state.cancel()
             else:
                 self._refresh_quotes(symbols, deadline)
                 account, positions, orders, clock, observed = self._read_account(deadline)
@@ -147,11 +171,15 @@ class Collector:
             return
         ref = account.account_id or f"lane:{self.ctx.lane}"
         visible = {o.client_order_id for o in orders if o.client_order_id}
-        with self.ctx.store.account_transaction(ref) as s:
+        with self.ctx.store.account_transaction(ref, bump_generation=False) as s:
             reservations = s.scalars(
                 select(Reservation).where(Reservation.account_ref == ref, Reservation.state.in_(ACTIVE))
             ).all()
             pending = [r for r in reservations if r.client_order_id not in visible]
+            managed = set(s.scalars(select(ManagedBracket.symbol).where(
+                ManagedBracket.account_ref == ref, ManagedBracket.lane == self.ctx.lane,
+                ManagedBracket.completed_at.is_(None),
+            )))
             reserved = sum((r.qty * r.price for r in pending if r.side == "buy"), Decimal(0))
             open_buy = sum((money(o.qty) * money(o.limit_price or 0) for o in orders if o.side == "buy"), Decimal(0))
             gross = sum((abs(money(p.market_value)) for p in positions), Decimal(0))
@@ -189,7 +217,7 @@ class Collector:
                     unrealized_pnl_pct=money(position.unrealized_pl) / abs(money(position.market_value)) * 100
                     if position and position.market_value
                     else 0,
-                    sellable_qty=max(Decimal(0), qty - selling),
+                    sellable_qty=max(Decimal(0), qty if symbol in managed else qty - selling),
                     held_minutes=None,
                     halted=self.ctx.store.is_halted(),
                     luld_active=None,
@@ -232,6 +260,11 @@ class Collector:
             )
             self.fs.write("market", "market", "session_phase", phase, observed, observed)
             self.fs.write("market", "market", "minutes_to_close", minutes, observed, observed)
+        if self.realtime:
+            from trader.features.wakeup import READY, notify
+
+            with self.ctx.store.session() as session:
+                notify(session, READY)
         if self.ctx.cfg.features.enabled and not self.realtime:
             from trader.features.recent import refresh_recent_from_store
 
@@ -242,14 +275,14 @@ class Collector:
                 with request_budget(deadline):
                     bars = self.ctx.broker.bars_range(symbols, start, end)
                 at = utcnow()
-                self.fs.ingest_minutes(symbols, start, end, bars, at, feed=self.ctx.cfg.data_feed)
+                self.fs.ingest_minutes(symbols, start, end, bars, at, feed=self.ctx.cfg.data_feed, revision_rank=0)
                 refresh_recent_from_store(self.fs, symbols, at, self.ctx.cfg.data_feed)
                 self.fs.health("bars", at, True)
             except Exception as exc:
                 self.fs.health("bars", utcnow(), False)
                 log.warning("features.recent_refresh_failed", error_type=type(exc).__name__)
 
-    def poll(self):
+    def poll(self, *, compute=True, collect_news=True):
         now = utcnow()
         deadline = Deadline(50)
         try:
@@ -284,6 +317,19 @@ class Collector:
             reverse=True,
         )
         symbols = sorted(set(self.ctx.cfg.symbols + [self.ctx.cfg.benchmark, "SPY", "QQQ"]))
+        if self.realtime and self.ctx.cfg.features.rolling_enabled:
+            # The historical worker reconciles the gap ledger off the ticker publication path.
+            for symbol in symbols:
+                with self.ctx.store.session() as s:
+                    gaps = list(s.scalars(select(Gap).where(
+                        Gap.scope.in_((symbol, bar_gap_scope(self.ctx.cfg.data_feed, symbol))),
+                        Gap.healed_at.is_(None), Gap.detected_at >= now - timedelta(days=self.ctx.cfg.features.history_days),
+                    )))
+                    for gap in gaps:
+                        statuses = self.fs.coverage(symbol, aware(gap.window_start), aware(gap.window_end),
+                                                    now, feed=self.ctx.cfg.data_feed)
+                        if statuses and "UNVERIFIED" not in statuses:
+                            gap.status, gap.healed_at = "HEALED", now
         # Live coverage first, then one historical session per pass. Every completed batch commits.
         if sessions:
             newest = sessions[0]
@@ -300,7 +346,7 @@ class Collector:
                     .where(
                         Gap.status == "UNRECOVERABLE",
                         Gap.healed_at.is_(None),
-                        Gap.scope.in_(symbols),
+                        Gap.scope.in_([*symbols, *(bar_gap_scope(self.ctx.cfg.data_feed, symbol) for symbol in symbols)]),
                         Gap.window_start < closing,
                         Gap.window_end > opening,
                     )
@@ -308,28 +354,30 @@ class Collector:
                 )
             if unrecoverable:
                 continue
-            if all("UNVERIFIED" not in self.fs.coverage(sym, opening, closing, now) for sym in symbols):
+            if all("UNVERIFIED" not in self.fs.coverage(sym, opening, closing, now, feed=self.ctx.cfg.data_feed) for sym in symbols):
                 continue
             self._bars(symbols, opening, closing, deadline)
             break
-        news_started = utcnow()
-        try:
-            with request_budget(deadline):
-                articles = self.ctx.broker.news(symbols, lookback_hours=48, limit=2000)
-            self.fs.ingest_news([a for a in articles if a.get("created_at")], utcnow())
-            self.fs.health("news", utcnow(), len(articles) < 2000)
-            log.info(
-                "news.poll_complete",
-                symbols=symbols,
-                lookback_hours=48,
-                count=len(articles),
-                capped=len(articles) >= 2000,
-                duration_ms=round((utcnow() - news_started).total_seconds() * 1000),
-            )
-        except Exception as exc:
-            self.fs.health("news", utcnow(), False)
-            log.warning("news.poll_failed", symbols=symbols, error_type=type(exc).__name__)
-        self.worker.compute(utcnow())
+        if collect_news:
+            news_started = utcnow()
+            try:
+                with request_budget(deadline):
+                    articles = self.ctx.broker.news(symbols, lookback_hours=48, limit=2000)
+                self.fs.ingest_news([a for a in articles if a.get("created_at")], utcnow())
+                self.fs.health("news", utcnow(), len(articles) < 2000)
+                log.info(
+                    "news.poll_complete",
+                    symbols=symbols,
+                    lookback_hours=48,
+                    count=len(articles),
+                    capped=len(articles) >= 2000,
+                    duration_ms=round((utcnow() - news_started).total_seconds() * 1000),
+                )
+            except Exception as exc:
+                self.fs.health("news", utcnow(), False)
+                log.warning("news.poll_failed", symbols=symbols, error_type=type(exc).__name__)
+        if compute:
+            self.worker.compute(utcnow())
         if not self.realtime:
             self.refresh(deadline)
 
@@ -346,7 +394,7 @@ class Collector:
                 self.fs.ingest_minutes(batch, start, end, {}, utcnow(), successful=False, feed=self.ctx.cfg.data_feed)
                 self.fs.health("bars", utcnow(), False)
                 continue
-            self.fs.ingest_minutes(batch, start, end, response, utcnow(), feed=self.ctx.cfg.data_feed)
+            self.fs.ingest_minutes(batch, start, end, response, utcnow(), feed=self.ctx.cfg.data_feed, revision_rank=0)
             self.fs.health("bars", utcnow(), True)
 
 
@@ -363,14 +411,23 @@ def stored_snapshot(ctx, cycle_id, *, bar_close=None):
         else:
             collector.refresh(Deadline(ctx.cfg.features.catchup_seconds))
     as_of = utcnow()
+    manifest = None
     with ctx.store.session() as s:
         refresh = s.get(FeatureState, f"refresh:{ctx.lane}")
         if refresh is None or (as_of - aware(refresh.updated_at)).total_seconds() > 30:
             raise SnapshotNotReady("fresh account features unavailable")
         state = refresh.state
+        if bar_close is not None and ctx.settings.realtime_enabled:
+            from trader.features.slots import slot_key
+
+            slot = s.get(FeatureState, slot_key(ctx.cfg.data_feed, bar_close))
+            symbols = sorted({*ctx.cfg.symbols, ctx.cfg.benchmark})
+            if slot is None or slot.state.get("symbols") != symbols:
+                raise SnapshotNotReady("coherent slot indicators unavailable")
+            manifest = slot.state
     clock = ClockSnap.model_validate(state["clock"])
     pack = Assembler(fs, ctx.cfg.features.min_ok_fraction, cfg=ctx.cfg).assemble(
-        as_of, ctx.cfg.symbols, state["account_ref"]
+        as_of, ctx.cfg.symbols, state["account_ref"], **({"slot_manifest": manifest} if manifest else {}),
     )
     if bar_close is not None:
         if not abs(clock.skew_s) <= ctx.cfg.risk.max_clock_skew_seconds:

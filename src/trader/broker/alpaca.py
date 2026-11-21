@@ -138,8 +138,11 @@ def _order_result(o: Any) -> OrderResult:
 
 class AlpacaBroker:
     def __init__(self, key_id: str, secret_key: str, data_feed: str = "iex", rate_limit_per_minute: int = 150) -> None:
+        from threading import local
+
         self._key_id = key_id
         self._secret = secret_key
+        self._read_transports = local()
         self._trading = _with_deadline(
             TradingClient(key_id, secret_key, paper=True)
         )  # paper only. url_override never set
@@ -153,6 +156,15 @@ class AlpacaBroker:
                 f"Refusing to start: trading host is {self.host!r}, expected {PAPER_TRADING_HOST!r}. "
                 "This system is paper-trading only."
             )
+
+    def isolated_reader(self):
+        """Reuse one HTTP session per worker while sharing the parent's request limiter."""
+        reader = getattr(self._read_transports, "reader", None)
+        if reader is None:
+            reader = AlpacaBroker(self._key_id, self._secret, self._feed.value)
+            reader._limiter = self._limiter
+            self._read_transports.reader = reader
+        return reader
 
     def _resolve_host(self) -> str:
         base = getattr(self._trading, "_base_url", "") or ""
@@ -329,10 +341,11 @@ class AlpacaBroker:
             {
                 "id": str(n.id),
                 "headline": n.headline,
-                "summary": (n.summary or "")[:400],
+                "summary": (n.summary or "")[:1000],
                 "source": n.source,
                 "symbols": n.symbols,
                 "created_at": n.created_at.isoformat() if n.created_at else None,
+                "updated_at": n.updated_at.isoformat() if n.updated_at else None,
             }
             for n in items
         ]
@@ -373,19 +386,31 @@ class AlpacaBroker:
         parent = self.get_order_by_client_id(client_order_id)
         if parent is None:
             return None
-        order = self._call(
-            lambda: self._trading.get_order_by_id(parent.alpaca_order_id, GetOrderByIdRequest(nested=True))
-        )
-        return _order_result(order)
+        return self.get_bracket_by_id(parent.alpaca_order_id)
+
+    def get_bracket_by_id(self, order_id: str) -> OrderResult | None:
+        try:
+            return _order_result(self._call(
+                lambda: self._trading.get_order_by_id(order_id, GetOrderByIdRequest(nested=True))
+            ))
+        except BrokerError as exc:
+            if exc.status_code != 404:
+                raise
+            return None
 
     def submit_managed_sell(
-        self, *, client_order_id: str, symbol: str, qty: int, stop_price: float | None = None
+        self, *, client_order_id: str, symbol: str, qty: int, stop_price: float | None = None,
+        limit_price: float | None = None,
     ) -> OrderResult:
         fields = dict(
             symbol=symbol, qty=qty, side=OrderSide.SELL, client_order_id=client_order_id,
             position_intent=PositionIntent.SELL_TO_CLOSE,
         )
-        if stop_price is None:
+        if limit_price is not None and stop_price is not None:
+            raise ValueError("managed sell accepts a stop or an IOC limit")
+        if limit_price is not None:
+            request = LimitOrderRequest(time_in_force=TimeInForce.IOC, limit_price=limit_price, **fields)
+        elif stop_price is None:
             request = MarketOrderRequest(time_in_force=TimeInForce.DAY, **fields)
         else:
             request = StopOrderRequest(time_in_force=TimeInForce.GTC, stop_price=stop_price, **fields)

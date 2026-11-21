@@ -19,6 +19,8 @@ x-app: &app
     TRADER_STATE_DIR: /app/state             # halt file: a kill switch that works with Postgres down
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
     REALTIME_ENABLED: ${REALTIME_ENABLED:-false}
+    PG_DISPATCH_ENABLED: ${PG_DISPATCH_ENABLED:-true}
+    MARKET_RECOVERY_GUARD: ${MARKET_RECOVERY_GUARD:-true}
     MANAGED_PAPER_ENABLED: ${MANAGED_PAPER_ENABLED:-false}
   volumes:
     - ./config:/app/config:ro
@@ -36,6 +38,10 @@ x-app: &app
     migrate:
       condition: service_completed_successfully
 
+x-postgres-ready: &postgres-ready
+  migrate:
+    condition: service_completed_successfully
+
 x-paper: &paper-env
   ALPACA_PAPER_KEY_ID: ${ALPACA_PAPER_KEY_ID:-}
   ALPACA_PAPER_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY:-}
@@ -46,6 +52,7 @@ x-baseline: &baseline-env
 
 x-agent: &agent-env
   <<: *app-env
+  TRADER_LLM_QUOTA_DATABASE_URL: ${TRADER_LLM_QUOTA_DATABASE_URL:-postgresql+psycopg://trader:${POSTGRES_PASSWORD:-trader}@postgres:5432/trader}
   LLM_PROFILE_LIVE: ${LLM_PROFILE_LIVE:-primary}
   LLM_PROFILE_SHADOW: ${LLM_PROFILE_SHADOW:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -131,6 +138,7 @@ services:
     environment:
       <<: [*app-env, *paper-env]
     command: ["tradectl", "run", "scheduler"]
+    depends_on: *postgres-ready
     healthcheck: &hc
       test: ["CMD", "tradectl", "health", "scheduler"]
       interval: 30s
@@ -142,6 +150,8 @@ services:
     <<: *app
     environment:
       <<: [*app-env, *paper-env]
+      ALPACA_HISTORY_KEY_ID: ${ALPACA_HISTORY_KEY_ID:-}
+      ALPACA_HISTORY_SECRET_KEY: ${ALPACA_HISTORY_SECRET_KEY:-}
     command: ["tradectl", "run", "features"]
     depends_on:
       migrate:
@@ -152,9 +162,19 @@ services:
 
   market-data:
     <<: *app
+    volumes:
+      - ./config:/app/config:ro
+      - ./state:/app/state
+      - tick-spool:/app/tick-spool
     environment:
       <<: [*app-env, *paper-env]
+      TRADER_TICK_SPOOL_DIR: /app/tick-spool
       TRADER_TICKS_QUEUE_CAPACITY: ${TRADER_TICKS_QUEUE_CAPACITY:-20000}
+      TRADER_TICKS_SPOOL_BYTES: ${TRADER_TICKS_SPOOL_BYTES:-67108864}
+      TRADER_TICKS_STREAM_STALE_SECONDS: ${TRADER_TICKS_STREAM_STALE_SECONDS:-45}
+      TRADER_TICKS_HISTORY_REQUESTS_PER_MINUTE: ${TRADER_TICKS_HISTORY_REQUESTS_PER_MINUTE:-60}
+      ALPACA_HISTORY_KEY_ID: ${ALPACA_HISTORY_KEY_ID:-}
+      ALPACA_HISTORY_SECRET_KEY: ${ALPACA_HISTORY_SECRET_KEY:-}
       TRADER_TICKS_BATCH_SIZE: ${TRADER_TICKS_BATCH_SIZE:-250}
       TRADER_TICKS_FLUSH_SECONDS: ${TRADER_TICKS_FLUSH_SECONDS:-0.25}
       TRADER_TICKS_RECOVERY_SECONDS: ${TRADER_TICKS_RECOVERY_SECONDS:-15}
@@ -169,6 +189,39 @@ services:
     healthcheck:
       <<: *hc
       test: ["CMD", "tradectl", "health", "market-data"]
+
+  news:
+    <<: *app
+    environment:
+      <<: [*app-env, *paper-env]
+      ALPACA_NEWS_KEY_ID: ${ALPACA_NEWS_KEY_ID:-}
+      ALPACA_NEWS_SECRET_KEY: ${ALPACA_NEWS_SECRET_KEY:-}
+    command: ["tradectl", "run", "news"]
+    depends_on: *postgres-ready
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "news"]
+
+  market-backup:
+    <<: *app
+    profiles: [backup-feed]
+    volumes:
+      - ./config:/app/config:ro
+      - ./state:/app/state
+      - tick-spool:/app/tick-spool
+    environment:
+      <<: *app-env
+      MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
+      TRADER_TICK_SPOOL_DIR: /app/tick-spool
+      TRADER_TICKS_SPOOL_BYTES: ${TRADER_TICKS_SPOOL_BYTES:-67108864}
+      TRADER_TICKS_HISTORY_REQUESTS_PER_MINUTE: ${TRADER_TICKS_BACKUP_REQUESTS_PER_MINUTE:-60}
+    command: ["tradectl", "run", "market-backup"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "tradectl", "health", "market-backup"]
 
   outbox:
     <<: *app
@@ -212,6 +265,7 @@ services:
     <<: *app
     environment: *agent-env
     command: ["tradectl", "run", "agent", "--variant", "live"]
+    depends_on: *postgres-ready
     healthcheck:
       <<: *hc
       test: ["CMD", "tradectl", "health", "agent-live"]
@@ -222,6 +276,7 @@ services:
       <<: [*app-env, *paper-env]
       ALERT_WEBHOOK_URL:
     command: ["tradectl", "run", "risk-gate", "--lane", "live"]
+    depends_on: *postgres-ready
     healthcheck:
       <<: *hc
       test: ["CMD", "tradectl", "health", "risk-gate-live"]
@@ -231,8 +286,11 @@ services:
     environment:
       <<: [*app-env, *paper-env]
       EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      PAPER_FAULT_ACCOUNT: ${PAPER_FAULT_ACCOUNT:-}
+      PAPER_FAULT_ORDER_ID: ${PAPER_FAULT_ORDER_ID:-}
       ALERT_WEBHOOK_URL:
     command: ["tradectl", "run", "executor", "--lane", "live"]
+    depends_on: *postgres-ready
     healthcheck:
       <<: *hc
       test: ["CMD", "tradectl", "health", "executor-live"]
@@ -242,6 +300,7 @@ services:
     environment:
       <<: [*app-env, *paper-env]
     command: ["tradectl", "run", "order-events", "--lane", "live"]
+    depends_on: *postgres-ready
     healthcheck:
       <<: *hc
       test: ["CMD", "tradectl", "health", "order-events-live"]
@@ -307,3 +366,4 @@ services:
 volumes:
   kafka-data:
   pg-data:
+  tick-spool:

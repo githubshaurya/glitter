@@ -136,7 +136,9 @@ class Store:
         Base.metadata.create_all(self.engine)
 
     @contextmanager
-    def account_transaction(self, account_ref: str) -> Iterator[Session]:
+    def account_transaction(
+        self, account_ref: str, *, consistent_snapshot: bool = False, bump_generation: bool = True,
+    ) -> Iterator[Session]:
         """Postgres row lock; SQLite uses a write transaction for offline parity tests."""
         from sqlalchemy import text
         from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -150,6 +152,8 @@ class Store:
             if sqlite:
                 s.execute(text("BEGIN IMMEDIATE"))
             else:
+                if consistent_snapshot:
+                    s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
                 s.execute(text("SET LOCAL lock_timeout = '5s'"))
                 s.execute(text("SET LOCAL statement_timeout = '30s'"))
             insert = sqlite_insert if sqlite else pg_insert
@@ -158,8 +162,16 @@ class Store:
                 .values(account_ref=account_ref, epoch=1, updated_at=utcnow())
                 .on_conflict_do_nothing(index_elements=["account_ref"])
             )
-            s.scalar(select(RiskAccount).where(RiskAccount.account_ref == account_ref).with_for_update())
+            account = s.scalars(select(RiskAccount).where(RiskAccount.account_ref == account_ref).with_for_update()).one()
             yield s
+            if bump_generation:
+                account.generation += 1
+
+    def account_generation(self, account_ref: str) -> int:
+        from trader.store.extended import RiskAccount
+
+        with self.session() as s:
+            return s.scalar(select(RiskAccount.generation).where(RiskAccount.account_ref == account_ref)) or 0
 
     # ------------------------------------------------------------------ dedupe (consumer side)
     def already_processed(self, group: str, event_id: str) -> bool:
@@ -241,7 +253,9 @@ class Store:
         from trader.store.extended import RiskAccount
 
         with self.session() as s:
-            s.execute(update(RiskAccount).values(epoch=RiskAccount.epoch + 1, updated_at=utcnow()))
+            s.execute(update(RiskAccount).values(
+                epoch=RiskAccount.epoch + 1, generation=RiskAccount.generation + 1, updated_at=utcnow(),
+            ))
         self.set_control("halted", False)
         self.set_control("halt_reason", "")
         control.clear_file_halt()

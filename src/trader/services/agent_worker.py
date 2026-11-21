@@ -24,7 +24,7 @@ from trader.agent.prompts import Prompt, build_user_prompt, load_prompt
 from trader.agent.tools import ToolContext, select_tools
 from trader.config import VariantConfig, load_variants
 from trader.events import topics
-from trader.events.envelope import Envelope
+from trader.events.envelope import Envelope, utcnow
 from trader.events.payloads import (
     CycleSkippedPayload,
     CycleSnapshotPayload,
@@ -69,6 +69,10 @@ class AgentWorker:
         self._council_clients_lock = Lock()
         self._failures = 0
         self._circuit_until = 0.0
+        if ctx.cfg.council.arbiter == "scored":
+            from trader.council.v2_engine import warm_prompt_templates
+
+            warm_prompt_templates(ctx.cfg)
 
     # ------------------------------------------------------------------ model selection (runtime switchable)
     def _active_profile(self) -> str:
@@ -110,13 +114,14 @@ class AgentWorker:
             from trader.risk.durable import enabled
 
             if enabled(self.ctx):
-                from trader.store.delivery import relay
+                from trader.store.delivery import relay_inline
 
-                relay(self.ctx.store, self.ctx.publisher, decision_id)
+                relay_inline(self.ctx, decision_id)
             log.info("agent.skip_already_decided", decision_id=decision_id)
             return
 
         t0 = time.monotonic()
+        queue_wait_ms = max(0, round((utcnow() - env.occurred_at).total_seconds() * 1000))
         if self.ctx.store.is_halted() and not (
             self.ctx.cfg.council.enabled and self.ctx.cfg.council.arbiter == "scored"
         ):
@@ -130,6 +135,9 @@ class AgentWorker:
             payload, sized = self._run_council(decision_id, snapshot, env)
         else:
             payload, sized = self._run_agent(decision_id, snapshot)
+        payload.queue_wait_ms = queue_wait_ms
+        payload.council_ms = round((time.monotonic() - t0) * 1000) if self.ctx.cfg.council.enabled else None
+        payload.deadline_missed = payload.deadline_missed or (env.expires_at is not None and utcnow() >= env.expires_at)
         self._emit(payload, sized, env)
         self.ctx.stats["decisions"] = self.ctx.stats.get("decisions", 0) + 1
         log.info(
@@ -155,13 +163,15 @@ class AgentWorker:
             "INCOMPLETE_DATA" if self.ctx.cfg.council.arbiter == "scored" else "stale",
             error="cycle expired before it was processed",
         )
+        payload.deadline_missed = True
+        payload.queue_wait_ms = max(0, round((utcnow() - env.occurred_at).total_seconds() * 1000))
         self._emit(payload, [], env)
 
     # ------------------------------------------------------------------ strategies
     def housekeeping(self):
         from sqlalchemy import and_, select
 
-        from trader.store.delivery import relay
+        from trader.store.delivery import relay_inline
         from trader.store.extended import WorkItem
         from trader.store.models import DecisionRow
 
@@ -182,7 +192,7 @@ class AgentWorker:
                     self.on_expired(env)
                 else:
                     self.handle(env)
-            relay(self.ctx.store, self.ctx.publisher)
+            relay_inline(self.ctx)
         self.ctx.beat(variant=self.name)
 
     def _base(self, decision_id: str, snap: MarketSnapshot, outcome: str, error: str | None = None) -> DecisionPayload:
@@ -335,6 +345,8 @@ class AgentWorker:
             payload.prompt_version = "council_v2" if scored else "council_v1"
             if scored:
                 payload.outcome = result["outcome"]
+                payload.quota_wait_ms = max((row.get("quota_wait_ms", 0) for row in result.get("role_audit", {}).values()), default=0)
+                payload.deadline_missed = any("DEADLINE" in reason for reason in result["reason_codes"])
             with self.ctx.store.session() as s:
                 s.merge(
                     EvidenceLink(
@@ -363,7 +375,16 @@ class AgentWorker:
             if scored:
                 from trader.council.v2 import size_with_gate_reduction
 
-                sized = size_with_gate_reduction(pack, result["decisions"], self.ctx.cfg)
+                sizing = []
+                sized = size_with_gate_reduction(pack, result["decisions"], self.ctx.cfg, audit=sizing)
+                for row in sizing:
+                    if row.get("reason"):
+                        payload.notes.append(f"{row['side']}:{row['symbol']}:{row['reason']}")
+                    if row["side"] == "buy" and "adjusted_budget_usd" in row:
+                        payload.notes.append(
+                            f"sizing:{row['symbol']}: {row['shares']} shares at ${row['limit_price']}, "
+                            f"${row['adjusted_budget_usd']} after {row['gate_multiplier']}x on {row['binding_cap']}"
+                        )
             else:
                 sized = size_candidates(pack, result["decisions"], self.ctx.cfg)
             if sized:
@@ -491,6 +512,7 @@ class AgentWorker:
                 qty=s.qty,  # type: ignore[arg-type]
                 limit_price=s.limit_price,
                 reference_price=s.reference_price,
+                analysis_entry_price=s.analysis_entry_price,
                 notional=s.notional,
                 conviction=s.conviction,
                 rationale=next((i.rationale for i in payload.decisions if i.symbol == s.symbol), ""),
@@ -510,13 +532,13 @@ class AgentWorker:
         from trader.risk.durable import enabled
 
         if enabled(self.ctx):
-            from trader.store.delivery import persist, relay
+            from trader.store.delivery import persist, relay_inline
 
             with self.ctx.store.session() as session:
                 for topic, event, key in batch:
                     persist(session, topic, event, payload.decision_id, key)
                 stop_reason = self._record_pilot(payload, session)
-            relay(self.ctx.store, pub, payload.decision_id)
+            relay_inline(self.ctx, payload.decision_id)
             if stop_reason and self.out_lane != "shadow":
                 self.ctx.store.halt("Council pilot: " + stop_reason)
         else:
@@ -526,10 +548,15 @@ class AgentWorker:
 
 
 def run(ctx: ServiceContext, variant_name: str) -> None:
+    from trader.store.dispatch import enabled, run_dispatch
+
     variants = load_variants()
     if variant_name not in variants:
         raise SystemExit(f"unknown variant {variant_name!r}; defined in experiments.yaml: {sorted(variants)}")
     worker = AgentWorker(ctx, variant_name, variants[variant_name])
+    if worker.out_lane == "live" and enabled(ctx):
+        run_dispatch(ctx, f"agent:{variant_name}", ("cycle", "cycle_skip"), worker.handle, worker.on_expired)
+        return
     consumer = BaseConsumer(
         bootstrap_servers=ctx.settings.kafka_bootstrap,
         group_id=f"agent-{variant_name}",
