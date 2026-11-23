@@ -1,6 +1,6 @@
 # 3. Decision journal
 
-This journal records the historical September replay across all 90 slots. It includes the saved model outputs for 11 full council reviews. Times are Eastern and shown to the second. Each window has a separate order ID sequence. The evidence files hold the recorded inputs, risk checks, and orders. Linked source audits preserve the exact provider requests and subsecond timestamps.
+This journal records the historical September replay across all 90 slots. It includes the saved model outputs for 11 full council reviews. Times are Eastern and shown to the second. Each window has a separate order ID sequence. The evidence files hold the recorded inputs, risk checks, and orders. The publication includes recorded model outputs and selected audit details. The full source audits are retained locally.
 
 | Window | Recorded inputs and checks |
 |---|---|
@@ -10,7 +10,6 @@ This journal records the historical September replay across all 90 slots. It inc
 
 ## 2025-09-09 · MU · 13:10 ET
 
-Source journal · Orders and quotes
 
 | Slot | Evidence time | Review | Chair choice | Recorded disposition | Fills |
 |---:|---|---|---|---|---|
@@ -327,7 +326,6 @@ Snapshot assembly took 0.133 s. Input to decision took 4.558 s. [Recorded input 
 
 ## 2025-09-10 · AAPL · 11:20 ET
 
-Source journal · Orders and quotes
 
 | Slot | Evidence time | Review | Chair choice | Recorded disposition | Fills |
 |---:|---|---|---|---|---|
@@ -872,7 +870,6 @@ provider rejected an unexpected model tool call
 
 ## 2025-09-22 · NVDA · 12:35 ET
 
-Source journal · Orders and quotes
 
 | Slot | Evidence time | Review | Chair choice | Recorded disposition | Fills |
 |---:|---|---|---|---|---|

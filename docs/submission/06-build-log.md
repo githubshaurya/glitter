@@ -2,23 +2,23 @@
 
 The original timestamped notes identify Claude Code for the supplied implementation and Codex for subsequent engineering, verification, and documentation. Python, pytest, Docker Compose, PostgreSQL, Kafka, the Alpaca API, and Groq were used in the recorded implementation and checks. Times below are IST. Local artifact timestamps mark when evidence was written. They do not estimate personal work hours.
 
-**Version count.** The local branch has 19 committed revisions through its current HEAD, including the initial import. It has 0 Git tags. Later uncommitted implementation and replay iterations appear below as milestones tied to local evidence. The public release has its own pinned commit.
+**Version count for this log.** The local development history through the Docker packaging revision contains 19 commits, including the initial import. The later milestones summarize work captured in local run records.
 
-Original build notes · [Public release](https://github.com/githubshaurya/glitter/tree/f017f596c08330c269d80cd4edb6373341fa0344)
+[Published app revision](https://github.com/githubshaurya/glitter/commit/773fca23641b3b37fe27e0a65084a4529260eb8f)
 
 ## Recorded engineering milestones
 
-| Date and time IST | Tool and work | Evidence |
-|---|---|---|
-| Nov 17, 2026 12:26–13:56 | Codex and pytest. Imported the implementation, implemented stored features and risk reservations, and reproduced lost acknowledgements and calendar revision races. Fixes included durable UNKNOWN state before publication and time-aware correction history. The final clean-export suite passed 240 tests. | Timestamped original log |
-| Nov 18, 2026 | Docker and pytest. Rectified hosted output contracts and resumed a five-session historical replay after a credential change. Preserved committed historical equity and retained the failed provider slot. The clean Docker export passed 399 unit tests and six infrastructure tests. | Five-session validation |
-| Nov 23, 2026 12:15:08 | Docker and Groq. The February replay and rerun exposed 19 provider-throttled reviews and two final Technical validation failures. Added paced replay batches, retained failure outcomes, and clarified required evidence fields. | Saved evidence |
-| Nov 23, 2026 12:33:12 | Docker, Codex, Alpaca SIP, and Groq. The first paced September run produced three council round trips for −$2.98. The Chair exited two positions near the first review while time remained. | Saved evidence |
-| Nov 23, 2026 12:42:17 | Python and the quote simulator. Replayed the same three approved entries with a 30-minute positive-P&L exit. The controlled result was +$0.33, and the quote replay exposed transient profits during order latency. | Saved evidence |
-| Nov 23, 2026 19:10:13 | Docker Compose, PostgreSQL, Kafka, and pytest. Added a paper-window cutoff, capped the signed authorization deadline, and gave the Chair the correct remaining time. A rollout briefly showed mixed code hashes. After redeploying, the services reported one hash and 105 focused tests passed. | Saved evidence |
-| Nov 23, 2026 19:41:13 | Groq and the historical simulator. Extending the prompt horizon alone still produced a discretionary NVDA exit at a $1.32 loss after roughly four minutes. Kept the evidence and moved the profit-taking check to the executable quote. | Saved evidence |
-| Nov 23, 2026 19:52:44 | Groq and Python. Replayed the three windows with fresh council reviews on profitable marks, retained stops, and verified submission quotes. Four trades closed for +$2.43. The simulator rejected one exit whose profit vanished during review. | Saved evidence |
-| Nov 23, 2026 19:56:05 | Alpaca paper API and Docker. Resumed the managed pilot before the US open, verified a flat account, and checked that orders, activity, and equity exports were accessible on an earlier sample window. The proof-window exports wait on the run. | Saved evidence |
+| Date and time IST | Tool and work |
+|---|---|
+| Nov 17, 2026 12:26–13:56 | Codex and pytest. Imported the implementation, implemented stored features and risk reservations, and reproduced lost acknowledgements and calendar revision races. Fixes included durable UNKNOWN state before publication and time-aware correction history. The final clean-export suite passed 240 tests. |
+| Nov 18, 2026 | Docker and pytest. Rectified hosted output contracts and resumed a five-session historical replay after a credential change. Preserved committed historical equity and retained the failed provider slot. The clean Docker export passed 399 unit tests and six infrastructure tests. |
+| Nov 23, 2026 12:15:08 | Docker and Groq. The February replay and rerun exposed 19 provider-throttled reviews and two final Technical validation failures. Added paced replay batches, retained failure outcomes, and clarified required evidence fields. |
+| Nov 23, 2026 12:33:12 | Docker, Codex, Alpaca SIP, and Groq. The first paced September run produced three council round trips for −$2.98. The Chair exited two positions near the first review while time remained. |
+| Nov 23, 2026 12:42:17 | Python and the quote simulator. Replayed the same three approved entries with a 30-minute positive-P&L exit. The controlled result was +$0.33, and the quote replay exposed transient profits during order latency. |
+| Nov 23, 2026 19:10:13 | Docker Compose, PostgreSQL, Kafka, and pytest. Added a paper-window cutoff, capped the signed authorization deadline, and gave the Chair the correct remaining time. A rollout briefly showed mixed code hashes. After redeploying, the services reported one hash and 105 focused tests passed. |
+| Nov 23, 2026 19:41:13 | Groq and the historical simulator. Extending the prompt horizon alone still produced a discretionary NVDA exit at a $1.32 loss after roughly four minutes. Kept the evidence and moved the profit-taking check to the executable quote. |
+| Nov 23, 2026 19:52:44 | Groq and Python. Replayed the three windows with fresh council reviews on profitable marks, retained stops, and verified submission quotes. Four trades closed for +$2.43. The simulator rejected one exit whose profit vanished during review. |
+| Nov 23, 2026 19:56:05 | Alpaca paper API and Docker. Resumed the managed pilot before the US open, verified a flat account, and checked that orders, activity, and equity exports were accessible on an earlier sample window. |
 
 ## Committed revision record
 

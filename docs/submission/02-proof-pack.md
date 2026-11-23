@@ -10,7 +10,7 @@ Three 30-minute September 2025 windows used Alpaca SIP candles and quotes. Each 
 | Sep 10, 2025 | AAPL | 11:20–11:50 | $8,000.48 | +$0.48 | +0.0060% | 0.0154% | 4 | 2 / 2 | +0.1364% |
 | Sep 22, 2025 | NVDA | 12:35–13:05 | $8,001.20 | +$1.20 | +0.0150% | 0.0405% | 2 | 1 / 1 | +0.0668% |
 
-The four closed trades yielded **+$2.43** in total and **4 of 4 wins**. All accounts ended flat. Returns use each window's own $8,000 ledger. Drawdown is based on recorded equity marks. The simulated fill price is the bid for a sale and ask for a buy, subject to the recorded limit and displayed depth. P&L reflects the spread and assumes zero additional fees. SPY is normalized to $8,000 at each window's open and held until that window's close. SPY returned more than the strategy over each selected window. Per-window numbers and SPY observations
+The four closed trades yielded **+$2.43** in total and **4 of 4 wins**. All accounts ended flat. Returns use each window's own $8,000 ledger. Drawdown is based on recorded equity marks. The simulated fill price is the bid for a sale and ask for a buy, subject to the recorded limit and displayed depth. P&L reflects the spread and assumes zero additional fees. SPY is normalized to $8,000 at each window's open and held until that window's close. SPY returned more than the strategy over each selected window.
 
 ![Simulated account equity and SPY over each window](assets/equity-vs-spy.png)
 
@@ -21,15 +21,7 @@ The four closed trades yielded **+$2.43** in total and **4 of 4 wins**. All acco
 | AAPL | Short 3 | $226.63 → $226.53 | 2m 00s | +$0.30 | 3.56 / 3.33 s |
 | NVDA | Long 4 | $183.70 → $184.00 | 19m 00s | +$1.20 | 3.43 / 3.76 s |
 
-## Evidence to check
-
-| Window | Orders | Strategy equity | SPY equity | Decision log |
-|---|---|---|---|---|
-| MU | CSV | CSV | CSV | JSONL |
-| AAPL | CSV | CSV | CSV | JSONL |
-| NVDA | CSV | CSV | CSV | JSONL |
-
-Verified trades and order timestamps · [All 90 slots and council outputs](03-decision-journal.md)
+The [historical journal](03-decision-journal.md) records all 90 slots and links to the saved inputs, risk checks, and simulated orders.
 
 ## Broker-backed paper evidence
 
@@ -53,4 +45,4 @@ The Chair approved both entries. AAPL's entry included Skeptic. INTC recorded ze
 
 [Broker orders, account activity, equity, and SPY marks](paper-broker-evidence.md) · [Paper decision journal](paper-decision-journal.md)
 
-The broker-backed run covers **one US trading date**. The three-session requirement remains outstanding.
+The two broker-backed windows took place on **one US trading date**. They establish paper execution in those windows. The unattended three-session run remains outstanding.
