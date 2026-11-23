@@ -4,7 +4,7 @@ Reserved/unknown exposure never disappears because a timer elapsed. All mutation
 take an account lock, and execution claims are committed before the broker call.
 """
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from time import monotonic
 
@@ -13,6 +13,7 @@ from sqlalchemy import select
 from trader.broker.base import BrokerError, DuplicateOrderError
 from trader.concurrency import BoundedPool, broker_reads
 from trader.config import PAPER_TRADING_HOST
+from trader.council.clock import ET
 from trader.events import topics
 from trader.events.envelope import Envelope, utcnow
 from trader.events.payloads import (
@@ -287,6 +288,22 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                 ).limit(1)
             )
             managed_entry = p.side == "buy" and ctx.cfg.risk.managed_exit_minutes is not None
+            managed_close = state.clock.next_close
+            window_end = ctx.cfg.risk.paper_window_end_et
+            valid_until = env.expires_at
+            if managed_entry and window_end is not None and managed_close is not None:
+                session_date = managed_close.astimezone(ET).date()
+                configured_close = datetime.combine(session_date, window_end, tzinfo=ET).astimezone(UTC)
+                managed_close = min(managed_close.astimezone(UTC), configured_close)
+                closeout = managed_close - timedelta(minutes=ctx.cfg.risk.managed_exit_minutes)
+                valid_until = min(valid_until, closeout)
+                if max(state.clock.timestamp, state.now) >= closeout:
+                    verdict.approved = False
+                    verdict.reason = "paper window closeout has begun"
+                    verdict.checks.append(CheckResultPayload(
+                        name="managed_window_open", passed=False, observed=state.clock.timestamp.isoformat(),
+                        limit=managed_close.isoformat(),
+                    ))
             previous_exit = OrderCommandPayload.model_validate(managed.exit_request) if managed and managed.exit_request else None
             handoff = (
                 managed is not None and managed.lane == ctx.lane and p.side == "sell" and money(p.qty) == actual_qty
@@ -374,7 +391,7 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                         limit_price=p.limit_price,
                         analysis_entry_price=p.analysis_entry_price,
                         account_ref=ref,
-                        valid_until=env.expires_at,
+                        valid_until=valid_until,
                         risk_epoch=epoch,
                         time_in_force="gtc" if protection is not None else (
                             "ioc" if handoff or p.analysis_entry_price is not None and p.side == "buy" else "day"
@@ -390,7 +407,7 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                 command = Envelope.of(
                     cmd, producer=ctx.service, correlation_id=p.cycle_id, lane=ctx.lane, causation_id=env.event_id
                 )
-                command.expires_at = env.expires_at  # never extend the authorization
+                command.expires_at = valid_until
                 s.add(
                     Reservation(
                         client_order_id=coid,
@@ -404,15 +421,15 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                         state="RESERVED",
                         created_at=now(),
                         updated_at=now(),
-                        expires_at=env.expires_at,
+                        expires_at=valid_until,
                         epoch=epoch,
                         command=command.model_dump(mode="json"),
                     )
                 )
-                if managed_entry and protection is not None and state.clock.next_close is not None:
+                if managed_entry and protection is not None and managed_close is not None:
                     s.add(ManagedBracket(
                         entry_id=coid, lane=ctx.lane, account_ref=ref, symbol=p.symbol,
-                        close_at=state.clock.next_close, exit_minutes=ctx.cfg.risk.managed_exit_minutes,
+                        close_at=managed_close, exit_minutes=ctx.cfg.risk.managed_exit_minutes,
                     ))
                 persist(s, topics.commands_topic(ctx.lane), command, p.proposal_id, p.symbol)
             v = Envelope.of(

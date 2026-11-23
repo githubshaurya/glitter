@@ -4,7 +4,7 @@ import asyncio
 import json
 from concurrent.futures import TimeoutError, wait
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from threading import Lock
@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 
 from trader.concurrency import AsyncRequests, BoundedPool, PoolBusy
 from trader.config import get_settings
-from trader.council.clock import is_off_slot, within_entry_window
+from trader.council.clock import ET, is_off_slot, within_entry_window
 from trader.council.engine import Council, CouncilBusy
 from trader.council.evidence import compact
 from trader.council.interactive import (
@@ -225,6 +225,16 @@ class ScoredCouncil:
             horizons=pack.content.get("horizons", {}),
             news_meta=pack.content.get("meta", {}).get("news", {}),
         )
+        window_end = self.cfg.risk.paper_window_end_et
+        if self.analysis_context is None and window_end is not None:
+            evidence_at = datetime.fromisoformat(pack.content["as_of"].replace("Z", "+00:00")).astimezone(ET)
+            close = datetime.combine(evidence_at.date(), window_end, tzinfo=ET)
+            closeout = close - timedelta(minutes=self.cfg.risk.managed_exit_minutes or 0)
+            body["paper_window"] = dict(
+                close_et=close.isoformat(),
+                seconds_remaining=max(0, (close - evidence_at).total_seconds()),
+                seconds_before_safety_closeout=max(0, (closeout - evidence_at).total_seconds()),
+            )
         if self.analysis_context is not None:
             body["scenario"] = dict(self.analysis_context)
             payoff = body["scenario"].pop("payoff_forecast", None)
@@ -339,6 +349,12 @@ class ScoredCouncil:
             ), prompt_numbers(body), schema
         system = _role_prefix(role, universe, self.analysis_context is not None,
                               not (self.cfg.council_v2.compact_hosted_prompts and self.cfg.council_v2.backend == "hosted"))
+        if role == "CHAIR" and "paper_window" in body:
+            system += (
+                " Make discretionary decisions within paper_window. Compare the expected net profit after costs "
+                "over the remaining time. For a held position, compare the executable sale now with the incremental "
+                "return and risk of holding. The safety manager can begin closing at the indicated closeout time."
+            )
         if self.cfg.council_v2.backend == "local":
             system += " Shared evidence prefix: " + canonical(prompt_numbers(pack.content))
         return system, prompt_numbers(body), schema
@@ -1073,6 +1089,8 @@ class ScoredCouncil:
                     if exit_review["must_close"]:
                         review.update(entry_ok=False, short_ok=False, decision="EXIT" if held else "COVER")
                         review["reasons"].append("FINAL_HOLDING_REVIEW")
+                if not interactive and self.cfg.risk.paper_window_end_et is not None and held:
+                    review.update(entry_ok=False, exit_ok=True, decision="EXIT", reduction_score=1.0)
                 return review
 
             pre = {s: assess(s) for s in sorted(candidates)}
@@ -1096,6 +1114,8 @@ class ScoredCouncil:
             stage("PREARBITER")
 
             def safe_exits():
+                if self.cfg.risk.paper_window_end_et is not None:
+                    return []
                 return [
                     dict(
                         symbol=s,

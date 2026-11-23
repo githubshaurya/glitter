@@ -7,6 +7,7 @@ Risk limits live here, in code-validated config, NOT in prompts.
 from __future__ import annotations
 
 import os
+from datetime import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,7 @@ class RiskLimits(BaseModel):
     allow_shorting: bool = False
     paper_bracket_entries: bool = False
     managed_exit_minutes: int | None = Field(None, ge=2, le=10)
+    paper_window_end_et: time | None = None
     bracket_stop_bps: int = Field(60, ge=5, le=2000)
     bracket_target_bps: int = Field(120, ge=5, le=5000)
     max_loss_to_stop_usd: float = Field(15, gt=0, allow_inf_nan=False)
@@ -324,8 +326,14 @@ def get_trading_config() -> TradingConfig:
     if settings.managed_paper_enabled:
         if not settings.realtime_enabled:
             raise ValueError("managed paper profile requires realtime scheduling")
-        values.setdefault("risk", {}).update(paper_bracket_entries=True, managed_exit_minutes=5)
+        risk = values.setdefault("risk", {})
+        risk["paper_bracket_entries"] = True
+        risk.setdefault("managed_exit_minutes", 5)
     config = TradingConfig.model_validate(values)
+    if config.risk.paper_window_end_et is not None and (
+        config.risk.managed_exit_minutes is None or config.risk.paper_window_end_et.tzinfo is not None
+    ):
+        raise ValueError("a paper window end requires managed exits and an exchange-local time")
     if config.risk.paper_bracket_entries and not config.durable_risk.enabled:
         raise ValueError("paper bracket entries require durable risk")
     if config.risk.managed_exit_minutes is not None and (
