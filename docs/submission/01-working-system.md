@@ -22,4 +22,4 @@ Select a decision to inspect completed candles, feature values, role responses a
 4. In the paper path, code enforces symbol, cash, exposure, daily loss, price freshness, and deadline limits. PostgreSQL serializes exposure reservations and stores durable intents. Kafka carries notifications. Stable client order IDs let the executor reconcile ambiguous broker outcomes.
 5. The default Docker UI sets `EXECUTION_ENABLED=false`. The separate paper stack explicitly enables submissions, uses a paper-only broker host check, and keeps a kill switch and position protection.
 
-The public `main` release was verified at the commit linked above. During evidence collection, the paper pilot ran from a separate local configuration and included a bounded trading window and safety closeout. Local paper pilot configuration and operating notes
+During the November 23 broker run, the app used separate timer-bounded paper configurations with an independent safety closeout. INTC also used a local council override to disable Skeptic while retaining Chair approval and the risk gate. The broker results and their scope are recorded in the [proof pack](02-proof-pack.md).

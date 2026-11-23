@@ -1,4 +1,4 @@
-# 2. Historical simulation proof pack
+# 2. Proof pack
 
 Three 30-minute September 2025 windows used Alpaca SIP candles and quotes. Each began flat with $8,000 in virtual cash, with full council review and Skeptic off. The sample covers a long in MU, two shorts in AAPL, and a long in NVDA. The replay evaluated held positions at minute checkpoints. A positive executable quote triggered a fresh council review, and a profit-taking order still needed to be profitable when submitted. Existing stop protection and the cutoff remained in effect.
 
@@ -31,13 +31,26 @@ The four closed trades yielded **+$2.43** in total and **4 of 4 wins**. All acco
 
 Verified trades and order timestamps · [All 90 slots and council outputs](03-decision-journal.md)
 
-
 ## Broker-backed paper evidence
 
-On November 23, 2026, the app ran ICE from 10:56 to 11:11 a.m. ET, then PEP from 11:14 to 11:29 a.m. ET. Alpaca confirmed zero orders, zero fills, and equity of $99,803.39 at both endpoints of each window. Paper return and sampled maximum drawdown were 0.00%. Win rate is undefined because there were zero closed trades. The matched SPY return was +0.0062% during ICE and −0.0324% during PEP.
+The app submitted orders to Alpaca’s paper broker on **November 23, 2026 ET**. AAPL ran first, followed by INTC. Alpaca recorded **five fill events across two round trips**, with **one win** and **+$3.58 realized paper P&L**. Equity moved from **$99,803.39 to $99,806.97**, a **+0.0036%** return across the two windows. The account ended flat with no open orders.
 
-![Paper account equity versus SPY](assets/ice-pep-equity-vs-spy.png)
+| Ticker | Window (ET) | Broker order records | Fill events | P&L (USD) | Paper return | Sampled drawdown | Matched SPY return |
+|---|---|---:|---:|---:|---:|---:|---:|
+| AAPL | 14:26–14:41 | 5 | 2 | -0.33 | -0.0003% | 0.0007% | -0.2495% |
+| INTC | 14:44–14:59 | 5 | 3 | +3.91 | +0.0039% | 0.0006% | +0.1789% |
 
-[Original broker export contents and minute-by-minute comparison](paper-broker-evidence.md) · [Paper decision journal](paper-decision-journal.md)
+| Ticker | Shares | Entry → exit | Entry ET | Exit ET |
+|---|---:|---:|---|---|
+| AAPL | 1 | $350.15 → $349.82 | 14:29:11 | 14:39:12 |
+| INTC | 17 | $58.02 → $58.25 | 14:50:14–14:50:15 | 14:57:06 |
 
-This covers one trading date. Broker-backed fills and the three-session requirement remain outstanding.
+Order records include canceled orders and protective legs. Drawdown uses the broker's one-minute equity marks. The SPY comparison uses IEX prices over the same minutes.
+
+![Alpaca paper equity versus SPY for AAPL and INTC](assets/aapl-intc-equity-vs-spy.png)
+
+The Chair approved both entries. AAPL's entry included Skeptic. INTC recorded zero Skeptic attempts. Both partial fills triggered a safety halt, and the app's managed closeout sold both positions near their cutoff. The profitable INTC sale leaves council-driven profit-taking unverified.
+
+[Broker orders, account activity, equity, and SPY marks](paper-broker-evidence.md) · [Paper decision journal](paper-decision-journal.md)
+
+The broker-backed run covers **one US trading date**. The three-session requirement remains outstanding.

@@ -44,8 +44,10 @@ Original build notes · [Public release](https://github.com/githubshaurya/glitte
 | `cf097f7` | Nov 18, 2026 15:19:04 | Document five-session council validation and complete audit evidence |
 | `6f2fe37` | Nov 19, 2026 05:16:57 | Package Docker simulator and realtime trading stack |
 
-## November 23 paper follow-up
+## November 24 IST paper follow-up
 
-- 21:26–21:41 IST. ICE began with incomplete indicators. Recent-session backfill warmed the feature pipeline, and the run switched from an observation-only setting to full council mode. The completed review held on a wide spread.
-- 21:44–21:59 IST. PEP completed four HOLD reviews. Provider rate limits interrupted other reviews. Alpaca confirmed zero orders, zero fills, and a flat account at both handoffs.
-- 22:01 IST. Restored the earlier pilot. Reconciled Alpaca exports with the app journal and verified the matched SPY comparison. [Paper proof pack](02-proof-pack.md)
+These two windows took place during the November 23 US trading session.
+
+- 00:56–01:11 IST. Ran AAPL through the Docker paper stack. The Chair approved an entry with Skeptic enabled. A partial fill halted discretionary reviews. The managed closeout sold the filled share. The operator resumed evidence capture after a monitoring interruption.
+- 01:14–01:29 IST. Ran INTC with Skeptic disabled in the bounded paper configuration. The approved entry records zero Skeptic attempts. The same halt triggered during the partial fill, and the managed closeout sold all 17 filled shares.
+- 01:31 IST. Verified the account was flat and restored the earlier pilot. Reconciled five Alpaca fill events against the app journals and saved the matched SPY comparison. [Paper proof pack](02-proof-pack.md)

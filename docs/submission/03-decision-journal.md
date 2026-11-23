@@ -1185,4 +1185,4 @@ provider rejected an unexpected model tool call
 
 ## November 23 paper journal
 
-The app recorded [45 paper-window decisions and scheduler events](paper-decision-journal.md). ICE had one completed HOLD, and PEP had four. Six reviews were provider-incomplete. Alpaca recorded zero orders or fills across the two windows.
+The [paper journal](paper-decision-journal.md) contains 15 window records for AAPL and INTC. The Chair approved two entries, INTC recorded six HOLD decisions, AAPL recorded three provider-incomplete decisions, and the scheduler logged four guard blocks. The [broker activity](paper-broker-evidence.md) captures both managed exits.

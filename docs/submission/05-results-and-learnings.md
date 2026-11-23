@@ -14,8 +14,10 @@ Across 90 slots, there were 11 full council reviews and 79 guarded slots. Input-
 
 ## Cost and remaining evidence
 
-The 55 returned model responses logged 92,299 uncached input tokens, 12,799 output tokens, and 7,168 cached input tokens. Applying the pinned replay profile's rates gives a **$0.0301 model-cost estimate** for the reported usage. Four rejected attempts returned no usage record. The replay workers ran for about **678 seconds** in total, including **561 seconds of test pacing**. The provider invoice, compute costs, and paper-run costs are still separate. Saved runs and stage timings · Pinned rates
+The 55 returned model responses logged 92,299 uncached input tokens, 12,799 output tokens, and 7,168 cached input tokens. Applying the pinned replay profile's rates gives a **$0.0301 model-cost estimate** for the reported usage. Four rejected attempts returned no usage record. The replay workers ran for about **678 seconds** in total, including **561 seconds of test pacing**. The provider invoice and compute costs are separate. Saved runs and stage timings · Pinned rates
 
 ## November 23 live paper results
 
-ICE and PEP produced five completed HOLD decisions, six provider-incomplete reviews, and zero broker orders or fills. Paper equity finished at $99,803.39, unchanged. Recorded model usage was $0.0667 at the app’s configured rates, an estimate rather than an invoice. Wide IEX quotes and missing ICE warm-up indicators prevented some entries. A PEP review with a 4.99 bps spread still held because the entry signal was too weak. Profit-taking remains unverified on the paper broker. [Paper proof pack](02-proof-pack.md)
+The AAPL and INTC round trips yielded **+$3.58** in realized paper P&L. AAPL lost $0.33 on one share after about ten minutes. INTC earned $3.91 on 17 shares after about seven minutes. Alpaca confirmed a flat account at $99,806.97. Estimated model usage was $0.0728 at the app’s configured model rates. [Broker results and matched SPY](02-proof-pack.md)
+
+Both partial fills halted discretionary reviews. The independent closeout handled the positions within their windows. The next question is whether a reconciled and protected partial position can resume exit-only council reviews with executable P&L in the Chair’s evidence. The three-session requirement and live council profit-taking remain open.
