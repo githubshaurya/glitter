@@ -1,0 +1,46 @@
+name: glitter-paper
+
+x-paper-mode: &paper-mode
+  TRADER_PAPER_UI_ENABLED: "true"
+  REALTIME_ENABLED: "true"
+  MANAGED_PAPER_ENABLED: "true"
+
+x-paper-worker: &paper-worker
+  environment: *paper-mode
+
+services:
+  postgres:
+    ports: !reset []
+  kafka:
+    ports: !reset []
+  paper-run:
+    profiles: [paper-proof]
+  paper-ui:
+    environment:
+      <<: *paper-mode
+      TRADER_VIEWER_WARM_WORKERS: "1"
+      TRADER_REPLAY_CACHE_DIR: /var/cache/glitter
+      TRADER_USE_BUNDLED_MODEL_PROFILES: "true"
+      ALPACA_REPLAY_KEY_ID: ${ALPACA_REPLAY_KEY_ID:-}
+      ALPACA_REPLAY_SECRET_KEY: ${ALPACA_REPLAY_SECRET_KEY:-}
+      GROQ_API_KEY: ${GROQ_REPLAY_API_KEY:-${GROQ_API_KEY:-}}
+      LLM_PROFILE_LIVE: ${LLM_PROFILE_LIVE:-primary}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['TRADER_VIEWER_PORT'] + '/health/ready', timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  scheduler: *paper-worker
+  features: *paper-worker
+  market-data: *paper-worker
+  news: *paper-worker
+  agent-live:
+    environment:
+      <<: *paper-mode
+      TRADER_USE_BUNDLED_MODEL_PROFILES: "true"
+  risk-gate-live: *paper-worker
+  executor-live: *paper-worker
+  order-events-live: *paper-worker
+  journal: *paper-worker
+  outbox: *paper-worker
+  watchdog: *paper-worker

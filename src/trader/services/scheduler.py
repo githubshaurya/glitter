@@ -68,6 +68,16 @@ class Scheduler:
         log.info("scheduler.skipped", reason=reason, detail=detail)
 
     def _emit_cycle(self, *, bar_close: datetime | None = None, broker_ahead_seconds: float = 0) -> bool:
+        symbols = self.cfg.symbols
+        if getattr(self.ctx.store, "paper_panel_enabled", False):
+            from trader.paper_panel import CONTROL_KEY, permits_order
+
+            paper_session = self.ctx.store.get_control(CONTROL_KEY) or {}
+            symbol = paper_session.get("symbol")
+            if symbol not in symbols or not permits_order(paper_session, symbol, utcnow()):
+                self._skip("paper_session_unavailable", bar_close=bar_close)
+                return False
+            symbols = [symbol]
         cycle_id = new_id() if bar_close is None else str(uuid5(NAMESPACE_URL, f"trader:cycle:{bar_close.isoformat()}"))
         snapshot_deadline = expires_at = None
         clock_adjustment = timedelta(seconds=broker_ahead_seconds)
@@ -89,10 +99,10 @@ class Scheduler:
             if bar_close is not None:
                 from trader.marketdata.readiness import entry_feed_issue
 
-                self.ctx.stats["entry_feed_issue"] = entry_feed_issue(self.ctx, self.cfg.symbols, utcnow())
+                self.ctx.stats["entry_feed_issue"] = entry_feed_issue(self.ctx, symbols, utcnow())
             if self.cfg.features.enabled and not self.cfg.features.legacy_inline_indicators:
                 from trader.features.collector import stored_snapshot
-                snapshot = stored_snapshot(self.ctx, cycle_id, bar_close=bar_close)
+                snapshot = stored_snapshot(self.ctx, cycle_id, bar_close=bar_close, symbols=symbols)
             else:
                 if bar_close is not None:
                     raise ValueError("realtime scheduling requires stored features")

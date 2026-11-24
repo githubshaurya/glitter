@@ -7,12 +7,12 @@ The app lets a reviewer replay a historical market window, inspect each council 
 Copy `.env.example` to `.env` and set `ALPACA_PAPER_KEY_ID`, `ALPACA_PAPER_SECRET_KEY`, and `GROQ_API_KEY` locally. With Docker and Compose running, use this command.
 
 ```sh
-docker compose -f compose.app.yml --profile kafka up --build
+docker compose -f compose.app.yml --profile kafka up --build -d --wait
 ```
 
-Open [the local app](http://localhost:8765). In **Simulation**, choose a Nasdaq ticker, historical date, start time in Eastern Time, duration, virtual cash, and holding policy. For a run on one of the proof windows, use MU on September 9, 2025 at 1:10 p.m. ET, $8,000, 30 minutes, intraday, full council, and Skeptic off. The proof used a local replay harness that only requested discretionary exit reviews at positive executable P&L and rechecked that P&L at submission. A fresh UI replay exercises the public app and its regular review cadence. Saved browser history lasts for the running app session.
+Open [the local app](http://localhost:8765). In **Simulation**, choose a Nasdaq ticker, historical date, start time in Eastern Time, duration, virtual cash, and holding policy. For a run on one of the proof windows, use MU on September 9, 2025 at 1:10 p.m. ET, $8,000, 30 minutes, intraday, full council, and Skeptic off. The proof used a local replay harness that only requested discretionary exit reviews at positive executable P&L and rechecked that P&L at submission. A fresh UI replay exercises the public app and its regular review cadence. Saved history persists in the local PostgreSQL volume across app restarts.
 
-Select a decision to inspect completed candles, feature values, role responses and the Chair verdict. Expand **STAR audit** to inspect the date, instrument, portfolio, strategy, role, and associated fills.
+Select a decision to inspect completed candles, feature values, role responses and the Chair verdict. Expand **STAR audit** to inspect the date, instrument, portfolio, strategy, role, and associated fills. For realtime trading, use the [paper UI launch command](../../README.md#alpaca-paper-trading).
 
 ## How it works
 

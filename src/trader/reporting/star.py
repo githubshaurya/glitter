@@ -1,6 +1,6 @@
-"""Dimensional audit projection for the viewer's historical and interactive decisions."""
+"""Dimensional audit projection for the viewer's historical simulation decisions."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from threading import Lock
 from uuid import uuid4
@@ -17,10 +17,8 @@ from sqlalchemy import (
     Numeric,
     String,
     Table,
-    and_,
     create_engine,
     delete,
-    or_,
     select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -233,36 +231,6 @@ class StarJournal:
         with self.lock, self.engine.connect() as connection:
             return set(connection.scalars(select(FACT_DECISION.c.decision_id).where(FACT_DECISION.c.scope == self.scope)))
 
-    def list_decisions(self, *, day=None, instrument=None, strategy=None, role=None, before=None, limit=25):
-        d = FACT_DECISION.c
-        filters = [d.scope == self.scope]
-        if day:
-            filters.append(d.date_id == date.fromisoformat(day).isoformat())
-        if instrument:
-            filters.append(d.instrument_id == instrument.upper())
-        if strategy:
-            filters.append(d.strategy_id == strategy)
-        if role:
-            logs = FACT_ROLE_LOG.c
-            filters.append(select(logs.scope).where(
-                logs.scope == d.scope, logs.decision_id == d.decision_id,
-                logs.role_id == role.upper(), logs.status != "SKIPPED",
-            ).exists())
-        if before:
-            timestamp, separator, identifier = before.partition("|")
-            if not separator or not identifier or len(identifier) > 256:
-                raise ValueError("Invalid audit cursor")
-            at = event_time(timestamp)
-            filters.append(or_(d.as_of < at, and_(d.as_of == at, d.decision_id < identifier)))
-        with self.lock, self.engine.connect() as connection:
-            rows = connection.execute(select(
-                d.decision_id.label("id"), d.as_of, d.date_id.label("date"), d.instrument_id.label("instrument"),
-                d.strategy_id.label("strategy"), d.outcome, d.latency_ms,
-            ).where(*filters).order_by(d.as_of.desc(), d.decision_id.desc()).limit(limit + 1)).mappings().all()
-        items = [dict(row, as_of=row["as_of"].replace(tzinfo=row["as_of"].tzinfo or UTC).isoformat()) for row in rows[:limit]]
-        cursor = f"{items[-1]['as_of']}|{items[-1]['id']}" if len(rows) > limit else None
-        return {"items": items, "next_cursor": cursor}
-
     def get(self, decision_id):
         key = dict(scope=self.scope, decision_id=decision_id)
         with self.lock:
@@ -274,6 +242,16 @@ class StarJournal:
                 return read_facts(connection, key)
 
     def project(self, decision_id, detail, *, symbol, strategy, portfolio, company=None):
+        key = dict(scope=self.scope, decision_id=decision_id)
+        with self.lock, self.engine.begin() as connection:
+            if self.closed:
+                raise SQLAlchemyError("The viewer's audit session has closed.")
+            self.write(connection, decision_id, detail, symbol=symbol, strategy=strategy, portfolio=portfolio,
+                       company=company)
+            return read_facts(connection, key)
+
+    def write(self, connection, decision_id, detail, *, symbol, strategy, portfolio, company=None):
+        """Write this decision and its facts in the caller's transaction."""
         when = event_time(detail["as_of"])
         date = when.astimezone(ET).date()
         key = dict(scope=self.scope, decision_id=decision_id)
@@ -284,41 +262,44 @@ class StarJournal:
         roles = _role_names(result, attempts)
         if "result" in payload:
             payload["result"] = {k: v for k, v in result.items() if k not in ("reports", "draft", "skeptic")}
-        with self.lock, self.engine.begin() as connection:
-            if self.closed:
-                raise SQLAlchemyError("The viewer's audit session has closed.")
-            if connection.scalar(select(FACT_DECISION.c.decision_id).filter_by(**key)) is None:
-                for table, row in (
-                    (DIM_DATE, dict(id=dims["date_id"], year=date.year, month=date.month, day=date.day, weekday=date.isoweekday())),
-                    (DIM_INSTRUMENT, dict(id=symbol, name=company)),
-                    (DIM_PORTFOLIO, dict(id=portfolio)), (DIM_STRATEGY, dict(id=strategy)),
-                ):
-                    connection.execute(self.insert(table).values(**row).on_conflict_do_nothing())
-                connection.execute(self.insert(DIM_ROLE).values([
-                    dict(id=role, position=position) for position, role in enumerate(roles)
-                ]).on_conflict_do_nothing())
-                connection.execute(FACT_DECISION.insert(), {
-                    **key, **dims, "as_of": when, **_summary(detail), "detail": payload,
-                })
-                connection.execute(FACT_ROLE_LOG.insert(), [{**key, **dims, **row} for row in role_rows(roles, result, attempts)])
-                fills = []
-                for sequence, fill in enumerate(detail.get("fills", [])):
-                    filled_at = event_time(fill.get("t"))
-                    fill_dims = dims
-                    if filled_at and (fill_day := filled_at.astimezone(ET).date()) != date:
-                        connection.execute(self.insert(DIM_DATE).values(
-                            id=fill_day.isoformat(), year=fill_day.year, month=fill_day.month,
-                            day=fill_day.day, weekday=fill_day.isoweekday(),
-                        ).on_conflict_do_nothing())
-                        fill_dims = {**dims, "date_id": fill_day.isoformat()}
-                    fills.append({
-                        **key, **fill_dims, "sequence": sequence, "order_id": fill["order_id"], "side": fill.get("side"),
-                        "shares": Decimal(str(fill["qty"])) if fill.get("qty") is not None else None,
-                        "price": Decimal(str(fill["price"])), "filled_at": filled_at, "detail": fill,
-                    })
-                if fills:
-                    connection.execute(FACT_FILL.insert(), fills)
-            return read_facts(connection, key)
+        if connection.scalar(select(FACT_DECISION.c.decision_id).filter_by(**key)) is not None:
+            return
+        for table, row in (
+            (DIM_DATE, dict(id=dims["date_id"], year=date.year, month=date.month, day=date.day, weekday=date.isoweekday())),
+            (DIM_INSTRUMENT, dict(id=symbol, name=company)),
+            (DIM_PORTFOLIO, dict(id=portfolio)), (DIM_STRATEGY, dict(id=strategy)),
+        ):
+            insert = self.insert(table).values(**row)
+            if table is DIM_INSTRUMENT and company:
+                insert = insert.on_conflict_do_update(index_elements=[table.c.id], set_={"name": company},
+                                                      where=table.c.name.is_(None))
+            else:
+                insert = insert.on_conflict_do_nothing()
+            connection.execute(insert)
+        connection.execute(self.insert(DIM_ROLE).values([
+            dict(id=role, position=position) for position, role in enumerate(roles)
+        ]).on_conflict_do_nothing())
+        connection.execute(FACT_DECISION.insert(), {
+            **key, **dims, "as_of": when, **_summary(detail), "detail": payload,
+        })
+        connection.execute(FACT_ROLE_LOG.insert(), [{**key, **dims, **row} for row in role_rows(roles, result, attempts)])
+        fills = []
+        for sequence, fill in enumerate(detail.get("fills", [])):
+            filled_at = event_time(fill.get("t"))
+            fill_dims = dims
+            if filled_at and (fill_day := filled_at.astimezone(ET).date()) != date:
+                connection.execute(self.insert(DIM_DATE).values(
+                    id=fill_day.isoformat(), year=fill_day.year, month=fill_day.month,
+                    day=fill_day.day, weekday=fill_day.isoweekday(),
+                ).on_conflict_do_nothing())
+                fill_dims = {**dims, "date_id": fill_day.isoformat()}
+            fills.append({
+                **key, **fill_dims, "sequence": sequence, "order_id": fill["order_id"], "side": fill.get("side"),
+                "shares": Decimal(str(fill["qty"])) if fill.get("qty") is not None else None,
+                "price": Decimal(str(fill["price"])), "filled_at": filled_at, "detail": fill,
+            })
+        if fills:
+            connection.execute(FACT_FILL.insert(), fills)
 
     def close(self, *, clear=False):
         with self.lock:

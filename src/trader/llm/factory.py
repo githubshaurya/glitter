@@ -86,7 +86,11 @@ register_provider("openai_compat", _build_openai_compat)
 
 
 def profiles_path() -> Path:
-    return config_dir() / "llm_profiles.yaml"
+    directory = config_dir()
+    configured = directory / "llm_profiles.yaml"
+    if not configured.exists() and os.environ.get("TRADER_USE_BUNDLED_MODEL_PROFILES") == "true":
+        return directory / "llm_profiles.paper.example.yaml"
+    return configured
 
 
 @lru_cache

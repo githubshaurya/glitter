@@ -402,7 +402,8 @@ class SnapshotNotReady(ValueError):
     """Stored inputs have yet to reach the decision boundary."""
 
 
-def stored_snapshot(ctx, cycle_id, *, bar_close=None):
+def stored_snapshot(ctx, cycle_id, *, bar_close=None, symbols=None):
+    trade_symbols = ctx.cfg.symbols if symbols is None else symbols
     fs = FeatureStore(ctx.store)
     if bar_close is None:
         collector = Collector(ctx)
@@ -427,7 +428,7 @@ def stored_snapshot(ctx, cycle_id, *, bar_close=None):
             manifest = slot.state
     clock = ClockSnap.model_validate(state["clock"])
     pack = Assembler(fs, ctx.cfg.features.min_ok_fraction, cfg=ctx.cfg).assemble(
-        as_of, ctx.cfg.symbols, state["account_ref"], **({"slot_manifest": manifest} if manifest else {}),
+        as_of, trade_symbols, state["account_ref"], **({"slot_manifest": manifest} if manifest else {}),
     )
     if bar_close is not None:
         if not abs(clock.skew_s) <= ctx.cfg.risk.max_clock_skew_seconds:

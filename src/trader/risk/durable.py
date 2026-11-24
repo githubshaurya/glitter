@@ -27,6 +27,7 @@ from trader.events.payloads import (
 )
 from trader.features.wakeup import PROTECTION, notify
 from trader.marketdata.readiness import entry_feed_issue
+from trader.paper_panel import CONTROL_KEY, permits_order
 from trader.risk.checks import PendingOrder
 from trader.risk.engine import evaluate
 from trader.risk.entry_price import entry_price_check, quote_seconds_remaining
@@ -288,6 +289,9 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                 ).limit(1)
             )
             managed_entry = p.side == "buy" and ctx.cfg.risk.managed_exit_minutes is not None
+            paper_selection = getattr(store, "paper_panel_enabled", False)
+            paper_session = (store.get_control(CONTROL_KEY) or {}) if paper_selection else {}
+            carry = paper_session.get("holding_policy") == "overnight"
             managed_close = state.clock.next_close
             window_end = ctx.cfg.risk.paper_window_end_et
             valid_until = env.expires_at
@@ -342,6 +346,13 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                         name="reconciliation_fresh", passed=False, observed="unresolved", limit="resolved or recent"
                     )
                 )
+            if paper_selection and not permits_order(paper_session, p.symbol, now()):
+                verdict.approved = False
+                verdict.reason = "order does not match the active paper session ticker"
+                verdict.checks.append(CheckResultPayload(
+                    name="paper_session_ticker", passed=False, observed=p.symbol,
+                    limit=paper_session.get("symbol") or "no active ticker",
+                ))
             trip = verdict.trip_kill_switch
             if now() >= env.expires_at or deadline.expired():
                 verdict.approved = False
@@ -429,7 +440,7 @@ def authorize(gate, env, now=utcnow, *, use_preflight=True):
                 if managed_entry and protection is not None and managed_close is not None:
                     s.add(ManagedBracket(
                         entry_id=coid, lane=ctx.lane, account_ref=ref, symbol=p.symbol,
-                        close_at=managed_close, exit_minutes=ctx.cfg.risk.managed_exit_minutes,
+                        close_at=None if carry else managed_close, exit_minutes=ctx.cfg.risk.managed_exit_minutes,
                     ))
                 persist(s, topics.commands_topic(ctx.lane), command, p.proposal_id, p.symbol)
             v = Envelope.of(
@@ -590,6 +601,13 @@ def reconcile_one(ctx, coid, deadline=None, *, submit_timing=None):
         relay_inline(ctx, item.proposal_id)
 
 
+def _execution_blocked(ctx, symbol):
+    store = ctx.store
+    return (not ctx.settings.execution_enabled or store.is_halted()
+            or (getattr(store, "paper_panel_enabled", False)
+                and not permits_order(store.get_control(CONTROL_KEY), symbol, utcnow())))
+
+
 def execute(ctx, env):
     cmd = env.parse(OrderCommandPayload)
     key = ctx.store.command_signing_key()
@@ -600,7 +618,7 @@ def execute(ctx, env):
         or not cmd.account_ref
     ):
         raise ValueError("invalid durable command authorization")
-    halted = ctx.store.is_halted() or not ctx.settings.execution_enabled
+    halted = _execution_blocked(ctx, cmd.symbol)
     with ctx.store.account_transaction(cmd.account_ref) as s:
         item = s.get(Reservation, cmd.client_order_id)
         if item is None or item.account_ref != cmd.account_ref or item.command["payload"] != env.payload:
@@ -638,7 +656,7 @@ def execute(ctx, env):
         if cmd.side == "buy" and (issue := entry_feed_issue(ctx, (cmd.symbol,), utcnow())):
             _result(ctx, cmd.client_order_id, "blocked", error=issue)
             return
-        if not ctx.settings.execution_enabled or ctx.store.is_halted():
+        if _execution_blocked(ctx, cmd.symbol):
             _result(ctx, cmd.client_order_id, "blocked", error="execution disabled or halted before send")
             return
         if utcnow() >= cmd.valid_until:
@@ -666,7 +684,7 @@ def execute(ctx, env):
             if not abs(clock.skew_s) <= ctx.cfg.risk.max_clock_skew_seconds:
                 _result(ctx, cmd.client_order_id, "blocked", error="broker clock skew exceeds the safety limit")
                 return
-            if ctx.store.is_halted():
+            if _execution_blocked(ctx, cmd.symbol):
                 _result(ctx, cmd.client_order_id, "blocked", error="halted during final account verification")
                 return
             protection = {"protection": cmd.protection} if cmd.protection else {}

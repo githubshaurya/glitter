@@ -44,7 +44,7 @@ class ManagedBracket(Base):
     account_ref: Mapped[str] = mapped_column(String(128), index=True)
     lane: Mapped[str] = mapped_column(String(32), index=True)
     symbol: Mapped[str] = mapped_column(String(16))
-    close_at: Mapped[datetime] = mapped_column(TS)
+    close_at: Mapped[datetime | None] = mapped_column(TS)
     exit_minutes: Mapped[int] = mapped_column(Integer)
     actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     status: Mapped[str] = mapped_column(String(64), default="awaiting_entry")

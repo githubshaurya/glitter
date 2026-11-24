@@ -44,6 +44,7 @@ services:
       TRADER_VIEWER_PORT: ${APP_PORT:-8765}
       TRADER_VIEWER_WARM_WORKERS: "1"
       TRADER_REPLAY_CACHE_DIR: /var/cache/glitter
+      TRADER_VIEWER_RUN_DIR: /var/cache/glitter/viewer-runs
       TRADER_VIEWER_DATABASE_URL: postgresql+psycopg://trader:${POSTGRES_PASSWORD:-trader}@postgres:5432/trader
       ALPACA_PAPER_KEY_ID: ${ALPACA_PAPER_KEY_ID:-}
       ALPACA_PAPER_SECRET_KEY: ${ALPACA_PAPER_SECRET_KEY:-}

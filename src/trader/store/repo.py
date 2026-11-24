@@ -6,6 +6,7 @@ redeliveries are harmless.
 
 from __future__ import annotations
 
+import os
 import secrets
 import threading
 from collections.abc import Iterator
@@ -92,6 +93,7 @@ def et_day_start_utc(now: datetime | None = None) -> datetime:
 
 class Store:
     def __init__(self, url: str) -> None:
+        self.paper_panel_enabled = os.environ.get("TRADER_PAPER_UI_ENABLED", "").lower() == "true"
         kwargs: dict[str, Any] = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
             kwargs.update(connect_args={"check_same_thread": False, "timeout": 30})
@@ -211,10 +213,15 @@ class Store:
             pass  # another service created it first: use theirs
         return str(self.get_control("command_signing_key"))
 
-    def is_halted(self) -> bool:
+    def is_halted(self, *, ignore_paper_panel: bool = False) -> bool:
         """Halt file first (needs no database), then the database flag."""
         if control.file_halted():
             return True
+        if self.paper_panel_enabled and not ignore_paper_panel:
+            from trader.paper_panel import CONTROL_KEY, permits_trading
+
+            if not permits_trading(self.get_control(CONTROL_KEY), utcnow()):
+                return True
         opening = self.get_control("paper_run_not_before")
         if (
             opening
@@ -230,6 +237,11 @@ class Store:
     def halt_reason(self) -> str:
         if control.file_halted():
             return control.file_halt_reason()
+        if self.paper_panel_enabled and not self.get_control("halted", False):
+            from trader.paper_panel import CONTROL_KEY, permits_trading
+
+            if not permits_trading(self.get_control(CONTROL_KEY), utcnow()):
+                return "Waiting for an enabled local paper session"
         opening = self.get_control("paper_run_not_before")
         if (
             not self.get_control("halted", False)

@@ -18,7 +18,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 
-from trader.backtest.decision import scenario_client_factory
+from trader.backtest.inputs import scenario_client_factory
 from trader.backtest.forecast import EXIT_RETRY, HORIZONS, LEGACY_VERSION, ForecastBook, quote_labels
 from trader.backtest.intraday import QuoteTape
 from trader.backtest.simulation import ACCOUNT, SimulationRequest, simulation_config, write_json

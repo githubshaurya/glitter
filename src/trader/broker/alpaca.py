@@ -283,6 +283,20 @@ class AlpacaBroker:
         ]
 
     # ------------------------------------------------------------------ market data (IEX on the free plan)
+    def paper_equity_name(self, symbol: str) -> str | None:
+        from alpaca.trading.enums import AssetClass, AssetStatus
+
+        try:
+            asset = self._call(lambda: self._trading.get_asset(symbol))
+        except BrokerError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        if (asset.symbol == symbol and asset.tradable and asset.status == AssetStatus.ACTIVE
+                and asset.asset_class == AssetClass.US_EQUITY):
+            return asset.name
+        return None
+
     def latest_quotes(self, symbols: list[str]) -> dict[str, QuoteSnap]:
         req = StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=self._feed)
         quotes = self._call(lambda: self._data.get_stock_latest_quote(req))

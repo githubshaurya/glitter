@@ -22,9 +22,10 @@ x-app: &app
     PG_DISPATCH_ENABLED: ${PG_DISPATCH_ENABLED:-true}
     MARKET_RECOVERY_GUARD: ${MARKET_RECOVERY_GUARD:-true}
     MANAGED_PAPER_ENABLED: ${MANAGED_PAPER_ENABLED:-false}
+    TRADER_PAPER_UI_ENABLED: ${TRADER_PAPER_UI_ENABLED:-false}
   volumes:
     - ./config:/app/config:ro
-    - ./state:/app/state                    # shared with the host: `tradectl halt` works from either side
+    - ${TRADER_HOST_STATE_DIR:-./state}:/app/state
   extra_hosts:
     - "host.docker.internal:host-gateway"   # reach a local Ollama / LM Studio / vLLM on the host
   restart: unless-stopped
@@ -62,6 +63,31 @@ x-agent: &agent-env
   LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-ollama}
 
 services:
+  paper-ui:
+    profiles: [paper-ui]
+    build:
+      context: .
+      target: viewer
+    image: glitter-paper-ui:local
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes:
+      - ./config:/app/config:ro
+      - ${TRADER_HOST_STATE_DIR:-./state}:/app/state:ro
+      - paper-ui-history:/var/cache/glitter
+    environment:
+      <<: [*app-env, *paper-env]
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      TRADER_VIEWER_PORT: ${PAPER_UI_PORT:-8766}
+      TRADER_VIEWER_DATABASE_URL: ${TRADER_PAPER_HISTORY_DATABASE_URL:-postgresql+psycopg://trader:${POSTGRES_PASSWORD:-trader}@postgres:5432/trader}
+      TRADER_VIEWER_RUN_DIR: /var/cache/glitter/viewer-runs
+    ports:
+      - "127.0.0.1:${PAPER_UI_PORT:-8766}:${PAPER_UI_PORT:-8766}"
+    depends_on: *postgres-ready
+
   # ------------------------------------------------------------------ infrastructure
   kafka:
     logging: *logs
@@ -364,6 +390,7 @@ services:
         condition: service_healthy
 
 volumes:
+  paper-ui-history:
   kafka-data:
   pg-data:
   tick-spool:

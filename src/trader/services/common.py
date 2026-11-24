@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,10 @@ def build_context(
     settings = get_settings()
     configure_logging(settings.log_level, service=service)
     cfg = get_trading_config()
+    if os.environ.get("TRADER_PAPER_UI_ENABLED", "").lower() == "true":
+        from trader.services.paper_universe import WORKER_SYMBOL, with_paper_symbol
+
+        cfg = with_paper_symbol(cfg, os.environ.get(WORKER_SYMBOL))
     if cfg.council.enabled and (
         not cfg.features.enabled or cfg.features.legacy_inline_indicators or not cfg.durable_risk.enabled
     ):

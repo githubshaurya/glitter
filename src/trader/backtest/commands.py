@@ -15,7 +15,7 @@ def replay(data_dir, output_dir, profile="primary", rule_only=False, feed="sip",
     from alpaca.data.requests import StockQuotesRequest
 
     from trader.backtest.corporate_actions import fetch_actions
-    from trader.backtest.decision import open_alpaca
+    from trader.backtest.inputs import open_alpaca
     from trader.backtest.replay import run_cached_sessions
     from trader.broker.alpaca import _with_deadline
     from trader.config import get_settings, get_trading_config

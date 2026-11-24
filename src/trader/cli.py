@@ -124,6 +124,14 @@ def run(
     if lane:
         os.environ["LANE"] = lane
     get_settings.cache_clear()
+    if os.environ.get("TRADER_PAPER_UI_ENABLED", "").lower() == "true":
+        from trader.services.paper_universe import RELOAD_SERVICES, WORKER_SYMBOL, supervise
+
+        live_worker = ((service != "agent" or os.environ.get("VARIANT", "live") == "live")
+                       and (service != "risk-gate" or os.environ.get("LANE", "live") == "live"))
+        if service in RELOAD_SERVICES and live_worker and WORKER_SYMBOL not in os.environ:
+            supervise(service, _store())
+            return
     if service == "scheduler":
         from trader.services.scheduler import main
     elif service == "agent":

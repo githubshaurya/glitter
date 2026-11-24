@@ -8,22 +8,21 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
 from dotenv import dotenv_values
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from yaml import YAMLError
 
-from trader.backtest.decision import (
+from trader.backtest.inputs import (
     NY,
     AlpacaReadOnly,
-    Scenario,
     ScenarioError,
     open_alpaca,
     open_feature_history,
@@ -61,7 +60,12 @@ SETTLE = timedelta(seconds=2)
 FINAL_EXIT_REVIEW = timedelta(seconds=100)
 
 
-class SimulationRequest(Scenario):
+class SimulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,11}$")
+    day: date
+    market_time: str = Field(default="10:30", pattern=r"^(?:0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]$")
     mode: Literal["historical"] = "historical"
     held_shares: Literal[0] = 0
     budget_usd: Decimal = Field(ge=Decimal("0.01"), le=100_000_000, decimal_places=2, allow_inf_nan=False)
@@ -83,6 +87,14 @@ class SimulationRequest(Scenario):
     blind_technical: bool = False
     mask_identity: bool = False
     sector_benchmark: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9.\-]{0,11}$")
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value):
+        return value.strip().upper() if isinstance(value, str) else value
+
+    def as_of(self):
+        return datetime.fromisoformat(f"{self.day}T{self.market_time}:20").replace(tzinfo=NY).astimezone(UTC)
 
     @model_validator(mode="after")
     def validate_exit_policy(self):

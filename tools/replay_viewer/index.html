@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Council replay</title>
+  <title>Glitter Trading Lab</title>
   <link rel="stylesheet" href="/viewer.css">
   <script src="/viewer.js" defer></script>
 </head>
@@ -11,16 +11,44 @@
   <header class="masthead">
     <div class="frame masthead-inner"><span>GLITTER / TRADING LAB</span><nav class="mode-switch" aria-label="Workspace">
       <button type="button" id="show-simulation" aria-pressed="true">Simulation</button>
-      <button type="button" id="show-analysis" aria-pressed="false">New analysis</button>
       <button type="button" id="show-history" aria-pressed="false">History</button>
-      <button type="button" id="show-audits" aria-pressed="false">Audit explorer</button>
-      <button type="button" id="show-replay" aria-pressed="false">Saved replay</button>
+      <button type="button" id="show-paper" aria-pressed="false">Paper trading</button>
     </nav></div>
   </header>
   <main class="frame">
     <section class="intro" aria-labelledby="title">
       <div><h1 id="title">Historical simulation</h1><p id="run-description">Replay a past market window with the trading council.</p></div>
-      <dl id="metrics" class="metrics" aria-label="Replay results"></dl>
+    </section>
+    <section id="paper" hidden aria-label="Realtime paper trading">
+      <div class="paper-desk">
+        <div class="paper-session">
+          <h2>Alpaca paper session</h2>
+          <p id="paper-status" role="status">Connecting…</p>
+          <p id="paper-config" class="quiet"></p>
+          <p id="paper-message" role="status" class="quiet"></p>
+          <p id="paper-connect" hidden><a href="http://localhost:8766/?paper=1">Open the local paper deployment</a></p>
+          <div id="paper-selection" class="scenario-fields paper-selection" hidden>
+            <label>Ticker<input id="paper-symbol" name="symbol" type="text" maxlength="12" placeholder="e.g. AAPL"
+                                autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+            <label>Holding policy<select id="paper-holding">
+              <option value="intraday">Intraday</option>
+              <option value="overnight">Overnight allowed</option>
+            </select></label>
+          </div>
+          <p id="paper-holding-note" class="quiet" hidden></p>
+          <div class="paper-actions">
+            <button id="paper-start" class="run-button" type="button" disabled>Start paper trading</button>
+            <button id="paper-stop" type="button" disabled>Stop new orders</button>
+          </div>
+          <p class="quiet">Stopping requests cancellation of resting buys. Managed position protection stays active.</p>
+        </div>
+        <div class="paper-inventory">
+          <h2>Paper account</h2>
+          <dl id="paper-balances" class="metrics"></dl>
+          <div id="paper-positions"></div>
+          <div id="paper-orders"></div>
+        </div>
+      </div>
     </section>
     <section id="simulation" aria-label="Historical simulation">
       <form id="simulation-form">
@@ -78,8 +106,15 @@
       </form>
       <div class="simulation-desk">
         <nav aria-label="Simulation history" class="simulation-rail">
-          <h3>Simulation history</h3>
+          <h3 id="simulation-list-title">Simulation history</h3>
+          <form id="simulation-history-filter" class="history-search" role="search" hidden>
+            <label for="simulation-history-search">Ticker or company</label>
+            <input id="simulation-history-search" type="search" maxlength="100" placeholder="e.g. AAPL or Apple" autocomplete="off">
+            <label for="simulation-history-date">Trading date (ET)</label>
+            <input id="simulation-history-date" type="date">
+          </form>
           <div id="simulation-list" class="history-list"></div>
+          <button type="button" id="simulation-history-more" class="text-button" hidden>Load more</button>
         </nav>
         <article class="simulation-sheet" aria-labelledby="simulation-run-title">
           <div id="simulation-report"><h3 id="simulation-run-title">Trade history</h3><p class="quiet">Run a simulation to see its orders, fills, and decisions here.</p></div>
@@ -87,103 +122,6 @@
         </article>
       </div>
     </section>
-    <section id="audit-explorer" aria-label="Audit explorer" hidden>
-      <form id="audit-query" class="sheet decision-section">
-        <div class="scenario-fields simulation-fields">
-          <label>Trading date (ET)<input type="date" name="day"></label>
-          <label>Ticker<input name="instrument" maxlength="12" placeholder="NVDA"></label>
-          <label>Strategy<input name="strategy" maxlength="80" placeholder="intraday-council"></label>
-          <label>Role<select name="role"><option value="">All roles</option></select></label>
-        </div>
-        <div class="form-footer">
-          <button type="submit" class="run-button">Apply filters</button>
-          <button type="button" id="audit-next" class="text-button" hidden>Next page</button>
-          <p id="audit-status" class="quiet" role="status"></p>
-        </div>
-      </form>
-      <div class="simulation-desk">
-        <nav class="simulation-rail" id="audit-list" aria-label="Matching audits"></nav>
-        <article class="simulation-sheet" id="audit-detail" aria-label="Selected audit"></article>
-      </div>
-    </section>
-    <section id="analysis-controls" class="analysis-controls" aria-label="Analysis setup" hidden>
-      <form id="analysis-form">
-        <div class="scenario-fields">
-          <label>NASDAQ ticker<input name="symbol" placeholder="AMD" pattern="[A-Za-z][A-Za-z0-9.\-]{0,11}" maxlength="12" required></label>
-          <label>Market data<select name="mode" id="data-mode"><option value="historical">Historical</option><option value="latest">Latest market (IEX)</option></select></label>
-          <label id="date-field">Trading date<input type="date" name="day" required></label>
-          <label id="time-field">Decision time (ET)<input type="time" name="market_time" value="10:30" step="60" required></label>
-          <label>Investment budget ($)<input type="number" name="budget_usd" min="0" max="100000000" step="0.01" value="1000" required></label>
-          <label>Shares already held<input type="number" name="held_shares" min="0" max="1000000" step="1" value="0" required></label>
-        </div>
-        <div class="form-footer">
-          <button class="run-button" type="submit">Run council</button>
-          <p id="analysis-status" class="quiet" role="status"></p>
-        </div>
-        <p id="mode-help" class="quiet">Enter holdings for this scenario. The paper account equity supplies the sizing reference.</p>
-      </form>
-      <aside class="account-card" aria-label="Alpaca paper account">
-        <div class="section-head"><h3>Alpaca paper account</h3><button id="refresh-account" type="button" class="text-button">Refresh</button></div>
-        <dl id="account"><div><dt>Total equity</dt><dd>Loading…</dd></div></dl>
-        <p id="account-status" class="quiet" role="status"></p>
-      </aside>
-    </section>
-    <p id="error" class="error" role="alert" hidden></p>
-    <div id="desk" class="desk" hidden>
-      <nav id="replay-rail" class="rail" aria-label="Replay timeline">
-        <label for="day">Trading session</label>
-        <select id="day"></select>
-        <div id="timeline" class="timeline" aria-label="Decision cycles"></div>
-      </nav>
-      <nav id="history-rail" class="rail history-rail" aria-label="Saved decisions" hidden>
-        <label for="history-search">Filter by ticker or company</label>
-        <input id="history-search" type="search" autocomplete="off" placeholder="Search stocks">
-        <button type="button" id="history-show-simulations" class="text-button">Simulation trade history</button>
-        <p id="history-status" class="quiet" role="status"></p>
-        <div id="history-list" class="history-list"></div>
-      </nav>
-      <article id="decision-sheet" class="sheet" aria-labelledby="cycle-title">
-        <div class="cycle-header">
-          <div><p id="cycle-date" class="eyebrow"></p><h2 id="cycle-title"></h2></div>
-          <div id="cycle-badges" class="badges" aria-live="polite"></div>
-        </div>
-        <section id="cycle-detail" aria-label="Selected decision">
-          <section id="recommendation" class="recommendation" aria-label="Share recommendation" hidden></section>
-          <section id="history-chair" class="decision-section chair-section" aria-labelledby="chair-title" hidden>
-            <h3 id="chair-title">Chair review</h3>
-            <dl id="chair-path" class="chair-path"></dl>
-            <p id="chair-verdict" class="quiet"></p>
-            <div id="chair-response"></div>
-          </section>
-          <div class="market">
-            <section class="chart-block" aria-labelledby="price-title">
-              <div class="section-head"><h3 id="price-title">Evidence at decision time</h3>
-                <div class="segmented" aria-label="Candle window">
-                  <button type="button" data-window="5" aria-pressed="false">5 min</button>
-                  <button type="button" data-window="10" aria-pressed="true">10 min</button>
-                </div>
-              </div>
-              <p id="chart-caption" class="quiet"></p>
-              <canvas id="candles" aria-label="Recorded candlestick prices" role="img"></canvas>
-              <details><summary>Candle and feature values</summary><div id="feature-data"></div></details>
-              <section id="pattern" class="scenario-news" aria-label="Intraday candlestick setup" hidden></section>
-              <section id="scenario-news" class="scenario-news" aria-label="Alpaca news" hidden></section>
-            </section>
-            <dl class="key-features" id="key-features" aria-label="Key features"></dl>
-          </div>
-          <section class="decision-section" aria-labelledby="council-title">
-            <div class="section-head"><h3 id="council-title">Council rationales</h3><span class="quiet">Recorded explanations</span></div>
-            <div id="decision-trace"></div>
-            <div id="roles"></div>
-            <div id="attempts"></div>
-          </section>
-          <section class="decision-section" aria-labelledby="execution-title">
-            <div class="section-head"><h3 id="execution-title">Risk and simulated execution</h3></div>
-            <div id="execution"></div>
-          </section>
-        </section>
-      </article>
-    </div>
   </main>
 </body>
 </html>

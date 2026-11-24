@@ -144,8 +144,10 @@ def _observe(ctx, lot, parent_intent, entry_id, ref, clock, key, order_id, cance
         or parent.qty != command.qty or not 0 <= parent.filled_qty <= parent.qty
     ):
         raise ValueError("broker entry differs from the signed parent")
-    actual_close = min(aware(lot.close_at), clock.next_close) if clock.is_open and clock.next_close else aware(lot.close_at)
-    close_due = (actual_close - clock.timestamp).total_seconds() <= lot.exit_minutes * 60
+    close_at = aware(lot.close_at) if lot.close_at is not None else None
+    if close_at is not None and clock.is_open and clock.next_close:
+        close_at = min(close_at, clock.next_close)
+    close_due = close_at is not None and (close_at - clock.timestamp).total_seconds() <= lot.exit_minutes * 60
     partial = 0 < parent.filled_qty < parent.qty
     if partial and lot.partial_observed_at is None:
         lot.partial_observed_at = utcnow()

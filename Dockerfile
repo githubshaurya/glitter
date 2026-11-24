@@ -11,10 +11,10 @@ WORKDIR /app
 
 # dependencies first (cached layer), then the project
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-install-project --no-dev
+RUN --mount=type=cache,id=glitter-uv,target=/root/.cache/uv uv sync --frozen --no-install-project --no-dev
 COPY src ./src
 COPY config ./config
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,id=glitter-uv,target=/root/.cache/uv uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 # no secrets are baked into the image: keys arrive via env_file / environment at run time
@@ -33,6 +33,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     EXECUTION_ENABLED=false
 USER 10001:10001
 EXPOSE 8765
-CMD ["python", "tools/replay_viewer.py", "--host", "0.0.0.0", "--session-only"]
+CMD ["python", "tools/replay_viewer.py", "--host", "0.0.0.0"]
 
 FROM trader AS services

@@ -1,4 +1,4 @@
-"""A warm, isolated worker for one class of browser jobs."""
+"""A warm, isolated worker for historical simulation."""
 
 import json
 import os
@@ -13,8 +13,7 @@ from time import monotonic
 
 
 class ViewerWorker:
-    def __init__(self, mode):
-        self.mode = mode
+    def __init__(self):
         self.process = None
         self.replies = None
         self.jobs = 0
@@ -26,7 +25,7 @@ class ViewerWorker:
         self.replies = Queue()
         self.jobs = 0
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "trader.backtest.viewer_worker", self.mode],
+            [sys.executable, "-m", "trader.backtest.viewer_worker"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
         )
         process, replies = self.process, self.replies
@@ -36,7 +35,7 @@ class ViewerWorker:
                 replies.put(line)
             replies.put(None)
 
-        Thread(target=read, daemon=True, name=f"{self.mode}-worker-output").start()
+        Thread(target=read, daemon=True, name="simulation-worker-output").start()
 
     def run(self, folder, timeout):
         if self.jobs >= 16:
@@ -67,15 +66,11 @@ class ViewerWorker:
         process.stdin.close()
 
 
-def serve(mode):
+def serve():
     control = sys.stdout
     sys.stdout = sys.stderr
-    if mode == "simulation":
-        from trader.backtest.simulation import main as run
-    elif mode == "decision":
-        from trader.backtest.decision import main as run
-    else:
-        raise ValueError("Unknown browser worker mode.")
+    from trader.backtest.simulation import main as run
+
     for line in sys.stdin:
         folder = Path(json.loads(line))
         previous = os.environ.get("TRADER_STATE_DIR")
@@ -97,4 +92,4 @@ def serve(mode):
 
 
 if __name__ == "__main__":
-    serve(sys.argv[1])
+    serve()

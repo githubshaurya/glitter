@@ -866,15 +866,6 @@ class ScoredCouncil:
 
             if any(content.get("availability", {}).get(k) != "fresh" for k in ("bars", "quotes", "account")):
                 return timed_reduction("SOURCE_UNAVAILABLE") or finish("INCOMPLETE_DATA", ["SOURCE_UNAVAILABLE"])
-            if (
-                self.analysis_context
-                and self.analysis_context.get("mode") == "latest"
-                and any(
-                    content["symbols"][symbol].get("intraday_setup_1m", {}).get("status") != "OK"
-                    for symbol in content["symbols"]
-                )
-            ):
-                return finish("INCOMPLETE_DATA", ["TEN_VERIFIED_CANDLES_REQUIRED"])
             held = {s for s in active if float(feasible[s]["held_qty"]) > 0}
             sellable = {s for s in held if feasible[s]["can_sell"]}
             position = {s: number(content["symbols"][s], "position_qty") for s in active} if shorting else {}

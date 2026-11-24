@@ -2,8 +2,6 @@
 
 const $ = (selector) => document.querySelector(selector);
 const ny = {timeZone: "America/New_York"};
-const time = new Intl.DateTimeFormat("en-US", {...ny, hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
-const date = new Intl.DateTimeFormat("en-US", {...ny, month: "short", day: "numeric", year: "numeric"});
 const cellNumber = new Intl.NumberFormat("en-US", {maximumFractionDigits: 4});
 const outcomeNames = {
   DECIDED_TRADE: "Trade intent", DECIDED_HOLD: "Hold", DECIDED_NO_TRADE: "No trade", INCOMPLETE_PROVIDER: "Provider failure",
@@ -17,8 +15,10 @@ const reviewSkipNotes = {
   REQUIRED_REVIEW_UNAVAILABLE: "A required review was unavailable.",
 };
 const state = {
-  view: "simulation", savedRun: null, analysis: null, run: null, cycle: null, detail: null, window: 10,
-  expiryTimer: null, history: [], historySelection: null,
+  view: "simulation",
+  simulationRuns: [],
+  historyId: null,
+  historyNext: null,
   simulationId: null, simulationRefresh: null, simulationVersion: 0,
 };
 const dollars = new Intl.NumberFormat("en-US", {style: "currency", currency: "USD"});
@@ -145,326 +145,6 @@ async function read(path, options) {
   return data;
 }
 
-function showError(message) {
-  $("#error").textContent = message;
-  $("#error").hidden = false;
-}
-
-function timeline(day) {
-  $("#timeline").replaceChildren();
-  for (const cycle of state.run.cycles.filter((item) => item.day === day)) {
-    const label = cycle.filled ? "Filled" : outcomeNames[cycle.outcome] || cycle.outcome;
-    const status = cycle.filled ? "positive" : cycle.outcome.startsWith("INCOMPLETE") ? "warning" : "";
-    const button = node("button", null, "slot");
-    button.type = "button";
-    button.dataset.run = cycle.run_id;
-    button.append(node("span", time.format(new Date(cycle.as_of))), node("strong", label, status));
-    button.addEventListener("click", () => selectCycle(cycle));
-    $("#timeline").append(button);
-  }
-}
-
-async function selectCycle(cycle) {
-  state.cycle = cycle;
-  state.detail = null;
-  $("#error").hidden = true;
-  $("#cycle-detail").hidden = true;
-  $("#cycle-date").textContent = date.format(new Date(cycle.as_of));
-  $("#cycle-title").textContent = `${time.format(new Date(cycle.as_of))} ET · ${state.run.symbol}`;
-  $("#cycle-badges").replaceChildren(
-    node("span", outcomeNames[cycle.outcome] || cycle.outcome, "badge"),
-    node("span", `${cycle.elapsed_s.toFixed(1)} s`, "badge"),
-  );
-  for (const button of document.querySelectorAll(".slot")) {
-    button.setAttribute("aria-current", String(button.dataset.run === cycle.run_id));
-  }
-  try {
-    const detail = await read(`/api/cycle/${encodeURIComponent(cycle.run_id)}`);
-    if (state.cycle !== cycle) return;
-    state.detail = detail;
-    $("#cycle-detail").hidden = false;
-    renderMarket();
-    renderCouncil();
-    renderExecution();
-  } catch (error) {
-    if (state.cycle === cycle) showError(`The saved decision could not be loaded (${error.message}).`);
-  }
-}
-
-function candleWindow() {
-  const pack = state.detail.evidence;
-  const context = pack.symbols?.[state.run.symbol]?.recent_price_10m?.v;
-  const rows = context?.candles?.filter(([offset]) => offset >= 10 - state.window) || [];
-  return {rows, context};
-}
-
-function candleTime(context, offset) {
-  return time.format(new Date(new Date(context.window_start).getTime() + offset * 60_000));
-}
-
-function drawCandles() {
-  if (!state.detail) return;
-  const {rows, context} = candleWindow();
-  const canvas = $("#candles");
-  const {width, height} = canvas.getBoundingClientRect();
-  if (!width || !height) return;
-  const dpr = devicePixelRatio || 1;
-  canvas.width = Math.round(width * dpr);
-  canvas.height = Math.round(height * dpr);
-  const paint = canvas.getContext("2d");
-  paint.scale(dpr, dpr);
-  const colors = getComputedStyle(canvas);
-  const color = (name) => colors.getPropertyValue(name).trim();
-  paint.font = "11px Consolas, monospace";
-  const verified = rows.filter((row) => row.slice(1, 5).every(Number.isFinite));
-  if (!verified.length) {
-    paint.fillStyle = color("--muted");
-    paint.fillText("No completed candles in this evidence pack.", 8, 26);
-    return;
-  }
-
-  const lo = Math.min(...verified.map((row) => row[3]));
-  const hi = Math.max(...verified.map((row) => row[2]));
-  const pad = Math.max((hi - lo) * .1, .001);
-  const xStart = 8, plotWidth = width - 70, plotHeight = height - 36;
-  const y = (v) => 8 + (hi + pad - v) / (hi - lo + 2 * pad) * plotHeight;
-  const stride = plotWidth / state.window;
-  const bodyWidth = Math.min(19, stride * .5);
-  for (let i = 0; i < 5; i++) {
-    const level = hi + pad - (hi - lo + 2 * pad) * i / 4;
-    const py = y(level);
-    paint.strokeStyle = color("--line");
-    paint.beginPath();
-    paint.moveTo(xStart, py);
-    paint.lineTo(xStart + plotWidth, py);
-    paint.stroke();
-    paint.fillStyle = color("--muted");
-    paint.fillText(`$${level.toFixed(2)}`, xStart + plotWidth + 5, py + 4);
-  }
-  for (const [offset, open, high, low, close] of verified) {
-    const x = xStart + (offset - (10 - state.window) + .5) * stride;
-    const candleColor = color(close >= open ? "--mint" : "--coral");
-    paint.strokeStyle = candleColor;
-    paint.fillStyle = candleColor;
-    paint.beginPath();
-    paint.moveTo(x, y(high));
-    paint.lineTo(x, y(low));
-    paint.stroke();
-    paint.fillRect(x - bodyWidth / 2, Math.min(y(open), y(close)), bodyWidth, Math.max(1.5, Math.abs(y(open) - y(close))));
-    if (stride >= 37 || offset % 2 === 0) {
-      paint.fillStyle = color("--muted");
-      paint.fillText(candleTime(context, offset), x - 15, height - 6);
-    }
-  }
-}
-
-function renderMarket() {
-  const pack = state.detail.evidence;
-  const symbol = state.run.symbol;
-  const features = pack.symbols?.[symbol] || {};
-  const {rows, context} = candleWindow();
-  const windowValues = context?.windows?.[`${state.window}m`];
-  const feed = context?.feed?.toUpperCase();
-  $("#chart-caption").textContent = [feed, "One-minute candles · ET", context ? `${rows.length} stored slots` : "No candle data"].filter(Boolean).join(" · ");
-  $("#key-features").replaceChildren(
-    pair(`${state.window}-minute return`, percent(windowValues?.return == null ? null : windowValues.return * 100)),
-    pair("15-minute RSI", display(features.rsi14_15m?.v)),
-    pair("15-minute EMA gap (bps)", display(features.ema_gap_bps_15m?.v)),
-    pair("15-minute MACD histogram", display(features.macd_hist_15m?.v)),
-    pair("15-minute ATR", display(features.atr14_15m?.v)),
-    pair("Distance from session VWAP", percent(features.vwap_dev_session?.v == null ? null : features.vwap_dev_session.v * 100)),
-    pair("Quoted spread (bps)", display(features.spread_bps?.v)),
-    pair("News coverage", display(pack.meta?.news?.[symbol]?.state)),
-  );
-  const featureData = $("#feature-data");
-  featureData.replaceChildren();
-  if (rows.length) featureData.append(table(["Time ET", "Open", "High", "Low", "Close", "Volume", "Coverage"], rows.map(
-    ([offset, ...values]) => [candleTime(context, offset), ...values],
-  )));
-  featureData.append(fold("Full stored evidence pack", () => showJson(pack)));
-  const patternPanel = $("#pattern");
-  const setup = features.intraday_setup_1m?.v;
-  patternPanel.hidden = !Object.hasOwn(features, "intraday_setup_1m");
-  patternPanel.replaceChildren();
-  if (setup) {
-    const label = setup.pattern === "NONE" ? "No recent reversal pattern" : setup.pattern.replaceAll("_", " ");
-    const confirmation = setup.confirmation.replaceAll("_", " ").toLowerCase();
-    const details = node("div", null, "pattern-content");
-    details.append(node("strong", label), node("p", `Prior trend ${setup.prior_trend.toLowerCase()} · ${confirmation}`, "quiet"),
-      node("p", `Volume ${display(setup.volume_ratio)}× recent median · Prior range ${cash(setup.range_floor)}–${cash(setup.range_ceiling)}`, "quiet"));
-    patternPanel.append(details);
-  } else if (!patternPanel.hidden) {
-    patternPanel.append(node("p", "Pattern analysis needs ten consecutive completed candles with trades.", "quiet"));
-  }
-  const news = state.detail.news;
-  const newsPanel = $("#scenario-news");
-  newsPanel.hidden = !news;
-  if (news) {
-    const status = {
-      empty: news.returned ? "No article versions available at this time" : "No articles returned for this window",
-      unavailable: "Alpaca news request unavailable",
-      retrieved: `${news.eligible} article${news.eligible === 1 ? "" : "s"} available at decision time`,
-    }[news.status];
-    newsPanel.replaceChildren(node("p", `Alpaca News · ${status}`, "quiet"));
-  }
-  drawCandles();
-}
-
-function renderChairPath(detail) {
-  const {result, attempts, scenario} = detail;
-  const chair = attempts.findLast(attempt => attempt.role === "CHAIR" && attempt.response.text);
-  let input;
-  try { input = JSON.parse(chair?.request.user); } catch { /* Some older records have no model inputs. */ }
-  const reports = roles.filter(role => input?.reports?.[role]).map(role =>
-    role.toLowerCase() + (input.reports[role].source === "code" ? " (code)" : ""));
-  const challenge = input?.independent_challenge;
-  const reviewed = [...reports, ...(challenge && result.skeptic ? ["skeptic"] : [])].join(" · ");
-  const proposal = result.draft?.candidates?.find(candidate => candidate.symbol === scenario.symbol);
-  const proposed = proposal
-    ? `${proposal.action.toUpperCase()} · conviction ${display(proposal.conviction)}`
-    : result.draft ? "No action proposed" : "Unavailable";
-  $("#chair-path").replaceChildren(
-    pair("Reports reviewed", reviewed || "Unavailable"),
-    pair("Chair proposal", proposed),
-    pair("Final decision", recordedRecommendation(detail)),
-  );
-  const rejected = detail.risk?.find(check => !check.approved);
-  const reasons = result.reason_codes?.map(reason => reason.replaceAll("_", " ").toLowerCase()).join(" · ");
-  const verdict = detail.latest_error || rejected?.reason || reasons || "";
-  $("#chair-verdict").textContent = verdict;
-  $("#chair-verdict").hidden = !verdict;
-}
-
-function renderCouncil() {
-  const {result, attempts, evidence} = state.detail;
-  const symbol = state.run.symbol;
-  const trace = $("#decision-trace");
-  const pre = result.prearbiter?.[symbol];
-  trace.replaceChildren();
-  if (pre) {
-    const summary = node("div", null, "trace-content");
-    const scores = pre.signals.map((signal) => `${signal.role.toLowerCase()} ${signal.eff.toFixed(2)}`).join(" · ");
-    const checks = pre.entry_checks;
-    const signalConflict = pre.reasons.includes("CONFLICT");
-    const explanation = signalConflict && !pre.signals.some((signal) => signal.eff > 0)
-      ? "Bearish evidence blocked a long entry."
-      : signalConflict ? "An opposing signal blocked a long entry."
-      : pre.reasons.includes("INSUFFICIENT_SIGNAL_SUPPORT") || (checks?.score_threshold && !checks?.signal_support)
-      ? "The score passed the threshold. Directional support requires one strong signal or two moderate signals."
-      : pre.reasons.includes("NO_SIGNAL_ABOVE_THRESHOLD") ? "Entry score or signal support was below the required level." : "";
-    summary.append(node("p", `Entry score ${pre.S.toFixed(2)} / ${pre.threshold_eff.toFixed(2)} required`));
-    if (scores) summary.append(node("p", scores, "quiet"));
-    if (pre.gates.length) summary.append(node("p", `Verified gates · ${pre.gates.map(gate => `${gate.role.toLowerCase()} ${gate.state.toLowerCase()}`).join(" · ")}`, "quiet"));
-    if (explanation) summary.append(node("p", explanation, "quiet"));
-    if (pre.exit_checks) {
-      const exit = result.arbiter?.[symbol] ?? pre;
-      const label = exit.exit_ok ? "Exit eligible for Chair review"
-        : !exit.exit_checks.sellable_inventory ? "No available whole shares to sell"
-        : !exit.exit_checks.bearish_threshold ? "Bearish evidence missed the exit threshold" : "Exit review unavailable";
-      summary.append(node("p", `Exit threshold ${exit.exit_threshold.toFixed(2)} or lower · ${label}`, "quiet"));
-    }
-    trace.append(summary);
-  }
-  const phases = state.detail.phase_timings;
-  if (phases) {
-    const measured = [["Setup", phases.warmup_s], ["Data", phases.market_data_s],
-      ["Features", phases.feature_compute_s], ["Council", phases.council_s]];
-    const label = measured.filter(([, seconds]) => Number.isFinite(seconds))
-      .map(([name, seconds]) => `${name} ${seconds.toFixed(1)} s`).join(" · ");
-    if (label) trace.append(node("p", label, "quiet"));
-  }
-  const roleRows = [];
-  for (const role of roles) {
-    const report = result.reports?.[role];
-    const item = report?.symbols?.find((value) => value.symbol === symbol);
-    const review = role === "CHAIR" ? result.draft : role === "SKEPTIC" ? result.skeptic : null;
-    const newsState = evidence.meta?.news?.[symbol]?.state;
-    const displayName = role[0] + role.slice(1).toLowerCase();
-    const roleRow = node("div", null, "role");
-    const label = node("div");
-    const note = node("div");
-    const source = review ? "Model" : {"llm+code": "Model + code", code: "Code"}[report?.source];
-    const roleAttempts = attempts.filter((attempt) => attempt.role === role);
-    const attempted = roleAttempts.length > 0;
-    const failure = result.role_audit?.[role]?.fallback;
-    const latestReply = roleAttempts.findLast((attempt) => attempt.response.text);
-    let publicAnswer;
-    if (latestReply) {
-      try { publicAnswer = JSON.parse(latestReply.response.text); } catch { /* Exact response is still in the audit. */ }
-    }
-    label.append(node("div", displayName, "role-name"), node("span", failure ? "Unavailable" : source || (attempted ? "Attempted" : "Skipped"), "badge"));
-    if (role === "NEWS" && newsState === "UNAVAILABLE") {
-      const empty = state.detail.news?.status === "empty";
-      const availability = empty ? "Alpaca returned no usable articles for this time." : "Historical news unavailable.";
-      note.append(node("p", attempted ? availability : `${availability} The news model was skipped.`));
-      if (attempted && !failure && publicAnswer?.assessment) {
-        note.replaceChildren(node("p", publicAnswer.assessment), node("p", "No usable articles. News abstains.", "quiet"));
-      }
-    } else if (review) {
-      if (review.note) note.append(node("p", review.note));
-      for (const candidate of review.candidates || []) {
-        if (role === "CHAIR" && state.view === "history") {
-          if (candidate.cited_roles.length) note.append(node("p", `Cited reports · ${candidate.cited_roles.join(", ")}`, "quiet"));
-        } else {
-          note.append(node("p", `${candidate.action.toUpperCase()} ${candidate.symbol} · conviction ${display(candidate.conviction)} · ${candidate.cited_roles.join(", ")}`, "quiet"));
-        }
-      }
-      if (review.objections) {
-        if (!review.objections.length) note.append(node("p", "No objections recorded."));
-        for (const objection of review.objections) {
-          note.append(node("p", `${objection.symbol} · Severity ${objection.severity} · ${objection.reason}`, "quiet"));
-        }
-      }
-      if (!note.children.length) note.append(node("p", "No candidates recorded."));
-    } else if (item) {
-      const code = item.signal?.state || item.gate?.state || report.risk_appetite;
-      if (!failure && publicAnswer?.assessment) note.append(node("p", publicAnswer.assessment));
-      else if (item.note) note.append(node("p", item.note));
-      if (item.advisory && item.note) note.append(node("p", item.note, "quiet"));
-      if (!failure && publicAnswer?.invalidation) {
-        note.append(node("p", `Invalidation: ${publicAnswer.invalidation}`, "quiet"));
-      }
-      if (code) note.append(node("p", code.replaceAll("_", " "), "quiet"));
-      if (item.evidence?.length) {
-        const refs = item.evidence.map((value) => value.path + (value.band ? ` · ${value.band}` : ""));
-        note.append(node("p", refs.join(" / "), "quiet"));
-      }
-    } else {
-      let skipped = "This role did not run for this decision.";
-      if (role === "CHAIR" && pre && !pre.entry_ok && !pre.exit_ok) skipped = "This run stopped at the entry and exit checks before chair review.";
-      if (role === "SKEPTIC" && !result.draft) skipped = "No chair assessment was available to review.";
-      skipped = reviewSkipNotes[result.role_audit?.[role]?.skip_reason] || skipped;
-      note.append(node("p", attempted ? "No validated report. See the recorded model attempts." : skipped, "quiet"));
-    }
-    if (failure) {
-      const fallback = report ? "Code assessment shown." : "No validated review was available.";
-      note.append(node("p", `Model ${failure.toLowerCase()} failure. ${fallback}`, "warning"));
-      if (result.role_audit[role].error) note.append(node("p", result.role_audit[role].error, "quiet"));
-    }
-    if (report?.evidence_stripped) note.append(node("p", `${report.evidence_stripped} unsupported evidence references were removed.`, "warning"));
-    if (roleAttempts.length || report || review) {
-      note.append(fold(`${displayName} inputs and complete responses`, () => {
-        const audit = node("div");
-        if (report || review) audit.append(fold("Validated report", () => showJson(report || review)));
-        for (const attempt of roleAttempts) audit.append(attemptDetails(attempt));
-        return audit;
-      }));
-    }
-    roleRow.append(label, note);
-    if (state.view === "history" && role === "CHAIR") $("#chair-response").replaceChildren(roleRow);
-    else roleRows.push(roleRow);
-  }
-  $("#roles").replaceChildren(...roleRows);
-  const logs = $("#attempts");
-  logs.replaceChildren(fold("Model inputs and responses", () => {
-    const audit = node("div");
-    if (!attempts.length) audit.append(node("p", "No model requests recorded.", "quiet"));
-    for (const attempt of attempts) audit.append(attemptDetails(attempt));
-    return audit;
-  }));
-  if (state.detail.star) logs.append(starAudit(state.detail));
-}
-
 function attemptDetails(attempt) {
   return fold(`${attempt.role} · Attempt ${attempt.attempt ?? "—"} · ${attempt.response.model || attempt.status || "Recorded"}`, () => {
     const details = node("div");
@@ -534,317 +214,131 @@ function renderExecutableOptions(target, result) {
   }));
 }
 
-function renderExecution() {
-  const {result, risk, orders, fills, sizing} = state.detail;
-  const target = $("#execution");
-  target.replaceChildren();
-  const reasons = (result.reason_codes || []).map((reason) => reason.replaceAll("_", " ").toLowerCase());
-  if (reasons.length) target.append(node("p", reasons.join(" · "), "quiet execution-line"));
-  renderExecutableOptions(target, result);
-  renderSizing(target, sizing);
-  if (!risk.length) target.append(node("p", "No proposal reached the risk gate.", "execution-line"));
-  for (const verdict of risk) {
-    const passed = verdict.checks?.filter((check) => check.passed).length || 0;
-    const checks = verdict.checks || [];
-    const label = verdict.approved ? "Approved" : "Rejected";
-    target.append(node("p", `${label} · ${passed}/${checks.length} checks passed${verdict.approved ? "" : ` · ${verdict.reason}`}`, "execution-line"));
-    target.append(fold("Risk check details", table(["Check", "Result", "Observed", "Limit"], checks.map(
-      (check) => [check.name, check.passed ? "Pass" : "Fail", check.observed, check.limit],
-    ))));
-  }
-  for (const order of orders) {
-    target.append(node("p", `${order.side.toUpperCase()} ${order.qty} ${order.symbol} · Limit $${display(order.limit_price)} · ${order.status}`, "execution-line"));
-    for (const fill of fills.filter((value) => value.order_id === order.id)) {
-      target.append(node("p", `Simulated fill · ${fill.qty} shares at $${display(fill.price)} · ${time.format(new Date(fill.t))} ET`, "positive execution-line"));
-    }
-  }
-}
-
-function recordedRecommendation({recommendation, result, outcome, latest_error, scenario, risk}) {
-  if (latest_error) return "Snapshot expired · 0 shares";
-  const status = result?.outcome || outcome;
-  if (status === "DECIDED_NO_TRADE") return "No trade · review unavailable";
-  if (status?.startsWith("INCOMPLETE") && !recommendation.shares) {
-    return "Analysis incomplete · 0 shares";
-  }
-  if (status === "DECIDED_TRADE" && !recommendation.shares) {
-    return risk?.some(verdict => !verdict.approved) ? "No order · risk rejected" : "No order · sizing blocked";
-  }
-  if (status === "DECIDED_HOLD" && scenario?.held_shares === 0) return "No trade · stayed flat";
-  return `${recommendation.action.toUpperCase()} · ${recommendation.shares} ${recommendation.shares === 1 ? "share" : "shares"}`;
-}
-
-function renderRecommendation(detail) {
-  const recommendation = detail.recommendation;
-  const target = $("#recommendation");
-  clearTimeout(state.expiryTimer);
-  const remaining = state.view === "analysis" && detail.expires_at ? new Date(detail.expires_at) - Date.now() : null;
-  const expired = detail.latest_error || (remaining !== null && remaining <= 0);
-  const text = expired ? "Snapshot expired · 0 shares" : recordedRecommendation(detail);
-  const maxNew = detail.evidence.feasibility?.[detail.scenario.symbol]?.max_new_notional_usd;
-  target.replaceChildren(node("strong", text, !expired && recommendation.action === "buy" ? "positive" : ""));
-  if (!expired && recommendation.shares) {
-    target.append(node("span", `${cash(recommendation.limit_price)} limit · ${cash(recommendation.notional)} notional`));
-  }
-  if (expired) target.append(node("p", detail.latest_error || "Run again for a fresh decision.", "quiet"));
-  else if (remaining !== null) {
-    state.expiryTimer = setTimeout(() => {
-      if (state.view === "analysis" && state.analysis === detail) renderRecommendation(detail);
-    }, remaining);
-  }
-  target.append(node("p", `Budget ${cash(detail.scenario.budget_usd)} · Usable cash ${cash(detail.effective_budget_usd)} · ` +
-    `Maximum new order ${cash(maxNew)} · Held ${detail.scenario.held_shares}`, "quiet"));
-}
-
-function displayAnalysis(detail = state.analysis) {
-  if (!detail) return;
-  state.run = {symbol: detail.scenario.symbol};
-  state.detail = detail;
-  $("#desk").hidden = false;
-  $("#decision-sheet").hidden = false;
-  $("#cycle-detail").hidden = false;
-  $("#cycle-date").textContent = date.format(new Date(detail.as_of));
-  $("#cycle-title").textContent = `${time.format(new Date(detail.as_of))} ET · ${detail.scenario.symbol}`;
-  $("#cycle-badges").replaceChildren(node("span", detail.company || detail.scenario.symbol, "badge"),
-    node("span", detail.scenario.mode === "latest" ? "Latest market · IEX" : "Historical", "badge"));
-  if (detail.source === "test") $("#cycle-badges").append(node("span", "Test run", "badge"));
-  if (detail.elapsed_s != null) $("#cycle-badges").append(node("span", `${detail.elapsed_s.toFixed(1)} s`, "badge"));
-  const viewingHistory = state.view === "history";
-  $("#history-chair").hidden = !viewingHistory;
-  $("#recommendation").hidden = viewingHistory;
-  $("#execution-title").textContent = "Recommendation risk checks";
-  if (viewingHistory) renderChairPath(detail);
-  else renderRecommendation(detail);
-  renderMarket();
-  renderCouncil();
-  renderExecution();
-}
-
-function showAccount(account) {
-  $("#account").replaceChildren(pair("Total equity", cash(account.equity)), pair("Cash", cash(account.cash)),
-    pair("Buying power", cash(account.buying_power)));
-  $("#account-status").textContent = "Current account snapshot";
-}
-
-async function refreshAccount() {
-  $("#refresh-account").disabled = true;
-  $("#account-status").textContent = "Reading the paper account…";
-  try {
-    showAccount(await read("/api/account"));
-  } catch (error) {
-    $("#account").replaceChildren(pair("Total equity", "Unavailable"));
-    $("#account-status").textContent = error.message;
-  } finally {
-    $("#refresh-account").disabled = false;
-  }
-}
-
-async function runAnalysis(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const submit = form.querySelector("button[type=submit]");
-  const status = $("#analysis-status");
-  const input = Object.fromEntries(new FormData(form));
-  state.analysis = null;
-  state.detail = null;
-  $("#desk").hidden = true;
-  $("#error").hidden = true;
-  submit.disabled = true;
-  status.textContent = "Fetching Alpaca data and running the council. This can take a few minutes.";
-  try {
-    state.analysis = await read("/api/scenario", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(input)});
-    showAccount(state.analysis.account);
-    status.textContent = `Decision ready for ${state.analysis.scenario.symbol}.`;
-    if (state.view === "analysis") displayAnalysis();
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    submit.disabled = false;
-  }
-}
-
 function showWorkspace(view) {
   clearTimeout(state.simulationRefresh);
+  clearTimeout(paperPoll);
   state.simulationVersion += 1;
   state.view = view;
-  state.detail = null;
-  state.cycle = null;
-  $("#error").hidden = true;
-  $("#desk").hidden = true;
-  $("#desk").classList.toggle("is-analysis", view === "analysis");
-  $("#desk").classList.toggle("is-history", view === "history");
-  $("#analysis-controls").hidden = view !== "analysis";
-  $("#simulation").hidden = view !== "simulation";
-  $("#audit-explorer").hidden = view !== "audits";
-  $("#history-rail").hidden = view !== "history";
-  $("#replay-rail").hidden = view !== "replay";
-  $("#history-chair").hidden = true;
-  $("#metrics").replaceChildren();
-  for (const name of ["analysis", "history", "replay", "simulation", "audits"]) {
+  const simulation = $("#simulation");
+  simulation.hidden = view === "paper";
+  simulation.setAttribute("aria-label", view === "history" ? "Trade history" : "Historical simulation");
+  $("#simulation-form").hidden = view !== "simulation";
+  $("#simulation-history-filter").hidden = view !== "history";
+  $("#simulation-history-more").hidden = true;
+  $("#simulation-list-title").textContent = view === "history" ? "Recorded runs" : "Simulation history";
+  $("#simulation-audit").replaceChildren();
+  $("#paper").hidden = view !== "paper";
+  for (const name of ["simulation", "history", "paper"]) {
     $(`#show-${name}`).setAttribute("aria-pressed", String(name === view));
   }
 }
 
-let nextAuditPage = null;
-let auditQuery = 0;
+let paperPoll;
+let paperUpdating = false;
+let paperRequest = 0;
+let paperState;
+const paperTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", hour: "numeric", minute: "2-digit",
+});
 
-async function selectAudit(item) {
-  const target = $("#audit-detail");
-  const loading = node("p", "Loading audit…", "quiet");
-  target.replaceChildren(loading);
-  try {
-    const audit = await read(`/api/audits/${encodeURIComponent(item.id)}`);
-    if (!target.contains(loading)) return;
-    const view = starAudit(audit);
-    view.open = true;
-    target.replaceChildren(node("h3", `${item.instrument} · ${item.date}`), view);
-  } catch (error) {
-    if (target.contains(loading)) loading.textContent = error.message;
-  }
+function updatePaperSelection() {
+  const data = paperState;
+  if (!data?.enabled) return;
+  const symbol = $("#paper-symbol").value.trim().toUpperCase();
+  const overnight = $("#paper-holding").value === "overnight";
+  const resume = overnight && data.session.holding_policy === "overnight" && data.session.symbol === symbol
+    && data.positions.length === 1 && data.positions[0].symbol === symbol;
+  $("#paper-start").disabled = paperUpdating || !data.execution_enabled || !data.market_open || data.active || data.halted
+    || !/^[A-Z][A-Z0-9.\-]{0,11}$/.test(symbol) || ((data.positions.length || data.open_order_count) && !resume);
+  $("#paper-holding-note").textContent = overnight
+    ? "Positions can carry past close with broker protection. Start a new session for the same ticker to resume council reviews."
+    : "The app attempts to close any remaining position before the market closes.";
 }
 
-async function loadAudits(before = null) {
-  const request = ++auditQuery;
-  const status = $("#audit-status");
-  const filters = new URLSearchParams();
-  for (const [name, value] of new FormData($("#audit-query"))) if (value.trim()) filters.set(name, value.trim());
-  if (before) filters.set("before", before);
-  $("#audit-next").hidden = true;
-  $("#audit-detail").replaceChildren();
-  status.textContent = "Loading audits…";
+async function refreshPaper() {
+  clearTimeout(paperPoll);
+  const request = ++paperRequest;
+  const current = () => request === paperRequest && state.view === "paper";
   try {
-    const {items, next_cursor} = await read(`/api/audits?${filters}`);
-    if (request !== auditQuery || state.view !== "audits") return;
-    const list = $("#audit-list");
-    list.replaceChildren();
-    for (const item of items) {
-      const button = node("button", null, "slot history-slot");
-      button.type = "button";
-      button.append(node("strong", `${item.instrument} · ${item.date}`),
-        node("span", `${time.format(new Date(item.as_of))} ET · ${outcomeNames[item.outcome] || item.outcome}`));
-      button.addEventListener("click", () => selectAudit(item));
-      list.append(button);
+    const data = await read("/api/paper");
+    if (!current()) return;
+    const firstStatus = !paperState?.enabled;
+    paperState = data;
+    $("#paper-connect").hidden = data.enabled;
+    $("#paper-selection").hidden = !data.enabled;
+    $("#paper-holding-note").hidden = !data.enabled;
+    if (!data.enabled) {
+      $("#paper-status").textContent = data.setup_error || "Connect to the local paper deployment to start a session.";
+      return;
     }
-    nextAuditPage = next_cursor;
-    $("#audit-next").hidden = !nextAuditPage;
-    status.textContent = items.length ? `${items.length} audits on this page` : "No audits match these filters.";
+    $("#paper-status").textContent = data.halted ? "Safety halt" : data.preparing ?
+      `Preparing market data for ${data.session.symbol}` : data.active ? "Paper trading enabled" :
+        !data.execution_enabled ? "Execution disabled in deployment settings" : "Paper trading stopped";
+    $("#paper-status").dataset.active = String(data.active);
+    const market = data.market_open ? "Market open" : "Market closed";
+    const expiry = data.active ? " · Ends " + paperTime.format(new Date(data.session.expires_at)) + " ET" : "";
+    const selection = $("#paper-symbol");
+    if (data.active || (firstStatus && !selection.value)) selection.value = data.session.symbol || "";
+    if (data.active || firstStatus) $("#paper-holding").value = data.session.holding_policy || "intraday";
+    selection.disabled = paperUpdating || data.active;
+    $("#paper-holding").disabled = paperUpdating || data.active;
+    const company = data.active && data.session.company ? " · " + data.session.company : "";
+    $("#paper-config").textContent = market + company + " · Entry window " +
+      data.entry_window.join("–") + " ET · " + cash(data.max_order_notional) + " per order limit" + expiry;
+    if (data.halted && data.halt_reason && !paperUpdating) $("#paper-message").textContent = data.halt_reason;
+    updatePaperSelection();
+    $("#paper-stop").disabled = paperUpdating || !(data.session.started_at);
+    $("#paper-balances").replaceChildren(pair("Equity", cash(data.account.equity)),
+      pair("Cash", cash(data.account.cash)), pair("Buying power", cash(data.account.buying_power)));
+    $("#paper-positions").replaceChildren(node("h3", "Positions"), data.positions.length ?
+      table(["Ticker", "Shares", "Average entry", "Unrealized P&L"],
+        data.positions.map(p => [p.symbol, p.qty, cash(p.avg_entry_price), cash(p.unrealized_pl)])) :
+      node("p", "No open positions", "quiet"));
+    $("#paper-orders").replaceChildren(node("h3", "Orders"), data.orders.length ?
+      table(["Ticker", "Side", "Requested", "Filled", "Fill price", "Status"],
+        data.orders.map(o => [o.symbol, o.side, o.qty, o.filled_qty ?? "—",
+          o.filled_avg_price == null ? "—" : cash(o.filled_avg_price), o.status])) :
+      node("p", "No orders recorded for this session", "quiet"));
   } catch (error) {
-    if (request === auditQuery && state.view === "audits") status.textContent = error.message;
-  }
-}
-
-function showAudits() {
-  showWorkspace("audits");
-  $("#title").textContent = "Audit explorer";
-  $("#run-description").textContent = "Find recorded decisions by date, instrument, strategy, and council role.";
-  loadAudits();
-}
-
-function renderHistoryList() {
-  const query = $("#history-search").value.trim().toLowerCase();
-  const matching = state.history.filter(run => `${run.symbol} ${run.company}`.toLowerCase().includes(query));
-  $("#history-status").textContent = !state.history.length ? "Run an analysis to start your history." :
-    matching.length === 0 ? "No decisions match this filter." : `${matching.length} saved ${matching.length === 1 ? "decision" : "decisions"}`;
-  $("#history-list").replaceChildren(...matching.map(run => {
-    const button = node("button", null, "slot history-slot");
-    button.type = "button";
-    button.dataset.run = run.id;
-    button.setAttribute("aria-current", String(run.id === state.historySelection?.id));
-    const header = node("span", null, "history-slot-title");
-    header.append(node("strong", run.symbol), node("span", recordedRecommendation(run),
-      run.recommendation.shares ? "positive" : run.outcome.startsWith("INCOMPLETE") || run.outcome === "DECIDED_NO_TRADE" ? "warning" : ""));
-    const at = new Date(run.as_of);
-    button.append(header, node("span", run.company, "history-company"),
-      node("span", `${date.format(at)} · ${time.format(at)} ET${run.source === "test" ? " · Test run" : ""}`, "history-date"));
-    button.addEventListener("click", () => selectHistory(run));
-    return button;
-  }));
-}
-
-async function selectHistory(run) {
-  state.historySelection = run;
-  state.detail = null;
-  $("#error").hidden = true;
-  $("#decision-sheet").hidden = true;
-  for (const button of $("#history-list").children) {
-    button.setAttribute("aria-current", String(button.dataset.run === run.id));
-  }
-  try {
-    const detail = await read(`/api/history/${encodeURIComponent(run.id)}`);
-    if (state.view === "history" && state.historySelection === run) displayAnalysis(detail);
-  } catch (error) {
-    if (state.view === "history" && state.historySelection === run) showError(error.message);
-  }
-}
-
-async function showHistory() {
-  showWorkspace("history");
-  $("#title").textContent = "Decision history";
-  $("#run-description").textContent = "Review saved decisions and the council’s explanations.";
-  $("#desk").hidden = false;
-  $("#decision-sheet").hidden = true;
-  $("#history-search").value = "";
-  $("#history-list").replaceChildren();
-  $("#history-status").textContent = "Loading decisions…";
-  try {
-    const {runs} = await read("/api/history");
-    if (state.view !== "history") return;
-    state.history = runs;
-    state.historySelection = runs.find(run => run.id === state.historySelection?.id) || runs[0];
-    renderHistoryList();
-    if (state.historySelection) await selectHistory(state.historySelection);
-  } catch (error) {
-    if (state.view === "history") {
-      $("#history-status").textContent = "";
-      showError(error.message);
+    if (current()) {
+      paperState = undefined;
+      $("#paper-status").textContent = error.message;
+      $("#paper-start").disabled = true;
     }
+  } finally {
+    if (current()) paperPoll = setTimeout(refreshPaper, 15000);
   }
 }
 
-async function showReplay() {
-  showWorkspace("replay");
-  $("#decision-sheet").hidden = false;
-  $("#recommendation").hidden = true;
-  $("#execution-title").textContent = "Risk and simulated execution";
-  $("#title").textContent = "Council replay";
-  $("#run-description").textContent = "Loading the saved session data…";
+async function changePaper(action) {
+  paperUpdating = true;
+  for (const id of ["#paper-start", "#paper-stop", "#paper-symbol", "#paper-holding"]) $(id).disabled = true;
+  clearTimeout(paperPoll);
+  paperRequest++;
+  const message = $("#paper-message");
+  message.textContent = action === "start" ? "Checking the paper account…" : "Disabling new orders…";
   try {
-    const run = state.savedRun || await read("/api/replay");
-    if (state.view !== "replay") return;
-    if (!run.cycles.length) throw new Error("No saved replay is configured.");
-    state.savedRun = run;
-    state.run = run;
-    const days = [...new Set(run.cycles.map((cycle) => cycle.day))];
-    const initial = run.cycles.find((cycle) => cycle.filled) || run.cycles[0];
-    const selector = $("#day");
-    selector.replaceChildren();
-    for (const day of days) selector.add(new Option(date.format(new Date(`${day}T16:00:00Z`)), day));
-    selector.value = initial.day;
-    selector.onchange = () => {
-      timeline(selector.value);
-      selectCycle(run.cycles.find((cycle) => cycle.day === selector.value));
-    };
-    $("#run-description").textContent = `${run.symbol} · ${days.length} trading sessions · ${days[0]} to ${days.at(-1)}`;
-    const m = run.metrics;
-    $("#metrics").replaceChildren(pair("Complete decisions", `${m.complete_cycles}/${m.cycles_total}`),
-      pair("Simulated fills", display(m.fill_events)), pair(`${run.symbol} strategy`, percent(m.return_pct, 4)),
-      pair(`${run.benchmark} buy & hold`, percent(m.benchmark_return_pct, 4)));
-    $("#desk").hidden = false;
-    timeline(initial.day);
-    await selectCycle(initial);
+    const body = action === "start" ? {
+      symbol: $("#paper-symbol").value.trim().toUpperCase(), holding_policy: $("#paper-holding").value,
+    } : {};
+    const result = await read("/api/paper/" + action, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    message.textContent = action === "start" ? "The council will review the ticker once fresh market data is ready." :
+      "New orders stopped. Broker cancellation requests: " + result.cancelled + ".";
   } catch (error) {
-    if (state.view !== "replay") return;
-    $("#run-description").textContent = "The saved replay could not be loaded.";
-    showError(error.message);
+    message.textContent = error.message;
+  } finally {
+    paperUpdating = false;
+    if (state.view === "paper") refreshPaper();
   }
 }
 
-function showAnalysis() {
-  showWorkspace("analysis");
-  $("#title").textContent = "Council decision";
-  $("#run-description").textContent = "Analyze the latest completed candles or choose a past intraday decision time.";
-  displayAnalysis();
-  refreshAccount();
+function showPaper() {
+  showWorkspace("paper");
+  $("#title").textContent = "Realtime paper trading";
+  $("#run-description").textContent = "Run the council on current market data with your Alpaca paper account.";
+  refreshPaper();
 }
 
 const secondTime = new Intl.DateTimeFormat("en-US", {...ny, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"});
@@ -868,7 +362,8 @@ async function openSimulationDecision(id, decision, button) {
   const loading = node("p", "Loading decision audit…", "quiet");
   audit.replaceChildren(loading);
   try {
-    const detail = await read(`/api/simulations/${id}/decisions/${decision.index}`);
+    const base = state.view === "history" ? "/api/trade-history" : "/api/simulations";
+    const detail = await read(`${base}/${id}/decisions/${decision.index}`);
     if (!audit.contains(loading)) return;
     const {result, attempts} = detail;
     const heading = node("h3", `${decision.index === "cutoff" ? "Risk exit audit" : "Council audit"} · ${secondTime.format(new Date(detail.as_of))} ET`);
@@ -925,16 +420,19 @@ function renderSimulation(run) {
   const {request, decisions, orders} = run;
   const title = node("h3", `${run.company || request.symbol} · ${request.day} · ${request.market_time} ET`);
   title.id = "simulation-run-title";
-  output.replaceChildren(title, node("p", run.error || runState[run.status], "quiet"));
+  const paper = run.source?.startsWith("paper");
+  const sourceLabel = paper ? (run.source === "paper-export" ? "Alpaca paper export" : "Alpaca paper account") : "Historical simulation";
+  output.replaceChildren(title, node("p", [sourceLabel, run.error || runState[run.status]].filter(Boolean).join(" · "), "quiet"));
   const policy = request.holding_period === "overnight" ? "Overnight allowed" : "Intraday";
   const maxHold = request.max_hold_minutes ? ` · ${request.max_hold_minutes} min position limit` : "";
-  output.append(node("p", `${policy}${maxHold} · Skeptic ${request.skeptic_enabled === false ? "off" : "on"}`, "quiet"));
+  if (!paper) output.append(node("p", `${policy}${maxHold} · Skeptic ${request.skeptic_enabled === false ? "off" : "on"}`, "quiet"));
   if (request.review_policy && request.review_policy !== "full") {
     output.append(node("p", `Review policy · ${request.review_policy.replaceAll("_", " ")}`, "quiet"));
   }
   if (run.payoff_sample_count) {
     const download = node("a", `Download ${run.payoff_sample_count} payoff samples`, "text-button");
-    download.href = `/api/simulations/${run.id}/payoff-samples/download`;
+    const base = state.view === "history" ? "/api/trade-history" : "/api/simulations";
+    download.href = `${base}/${run.id}/payoff-samples/download`;
     download.download = "payoff-samples.jsonl";
     output.append(download);
   }
@@ -981,11 +479,13 @@ function renderSimulation(run) {
   const exitLabels = {session_cutoff: "session safety exit", holding_deadline: "holding deadline safety exit",
     stop_loss: "stop loss", take_profit: "take profit"};
   if (orders.length) {
-    const tradeTable = table(["Submitted (ET)", "Side", "Requested", "Filled", "Fill price", "Status"], orders.map(order => [
+    const tradeTable = table([run.source === "paper-ledger" ? "First recorded (ET)" : "Submitted (ET)",
+      "Side", "Requested", "Filled", "Fill price", "Status"], orders.map(order => [
       secondTime.format(new Date(order.submitted_at)), orderAction(order.side, order.position_effect), order.qty,
       order.filled_qty ?? 0,
       order.fill_price == null ? "—" : cash(order.fill_price),
-      (order.status === "filled" ? "Filled" : order.status === "partial" ? "Partial fill · remainder canceled"
+      (order.status === "filled" ? "Filled" : paper && order.filled_qty > 0 && order.status === "canceled"
+        ? "Partial fill · remainder canceled" : order.status === "partial" ? "Partial fill · remainder canceled"
         : (order.unfilled_reason || order.status).replaceAll("_", " ")) +
         (exitLabels[order.reason] ? ` · ${exitLabels[order.reason]}`
           : order.decision_source === "code" ? ` · ${order.option_id ? "Replay policy" : "Timed risk reduction"}`
@@ -999,7 +499,7 @@ function renderSimulation(run) {
     tradeTable.tabIndex = 0;
     ledger.append(tradeTable);
   } else {
-    ledger.append(node("p", "No simulated orders recorded.", "quiet"));
+    ledger.append(node("p", paper ? "No paper orders recorded." : "No simulated orders recorded.", "quiet"));
   }
   if (orders.some(order => order.decision_index == null && exitLabels[order.reason])) {
     const cutoff = node("button", "View automatic exits", "text-button");
@@ -1022,7 +522,7 @@ function renderSimulation(run) {
     const wait = decision.replay_quota_wait_s ? ` · ${decision.replay_quota_wait_s.toFixed(1)} s replay queue` : "";
     const label = decision.review_status === "degraded" ? `${outcome} · Degraded review` : outcome;
     const latency = decision.input_to_decision_s ?? decision.elapsed_s;
-    button.append(node("strong", mark), node("span", label), node("span", `${latency.toFixed(2)} s${wait}`));
+    button.append(node("strong", mark), node("span", label), node("span", latency == null ? "—" : `${latency.toFixed(2)} s${wait}`));
     button.addEventListener("click", () => openSimulationDecision(run.id, decision, button));
     rows.append(button);
   }
@@ -1030,32 +530,87 @@ function renderSimulation(run) {
   output.append(council);
 }
 
+function runButton(run, selected, select, history = false) {
+  const button = node("button", null, "slot history-slot");
+  button.type = "button";
+  button.setAttribute("aria-current", String(run.id === selected));
+  button.append(node("strong", `${run.request.symbol} · ${run.request.day}`));
+  if (history && run.company && run.company !== run.request.symbol) button.append(node("span", run.company));
+  const source = !history ? "" : run.source?.startsWith("paper") ? " · Alpaca paper" : " · Simulation";
+  button.append(node("span", `${run.request.market_time} ET · ${run.filled_orders} orders filled${source}`));
+  button.addEventListener("click", () => select(run.id, button));
+  return button;
+}
+
+function renderSimulationList() {
+  const list = $("#simulation-list");
+  list.replaceChildren();
+  if (!state.simulationRuns.length) list.append(node("p", "No runs in this launch.", "quiet"));
+  for (const run of state.simulationRuns) {
+    list.append(runButton(run, state.simulationId, id => {
+      state.simulationId = id;
+      $("#simulation-audit").replaceChildren();
+      refreshSimulations();
+    }));
+  }
+}
+
+async function openHistoryRun(id, button) {
+  state.historyId = id;
+  for (const item of $("#simulation-list").querySelectorAll("button")) {
+    item.setAttribute("aria-current", String(item === button));
+  }
+  $("#simulation-audit").replaceChildren();
+  const output = $("#simulation-report");
+  const loading = node("p", "Loading recorded run…", "quiet");
+  output.replaceChildren(loading);
+  try {
+    const run = await read(`/api/trade-history/${id}`);
+    if (state.view === "history" && output.contains(loading)) renderSimulation(run);
+  } catch (error) {
+    if (output.contains(loading)) output.replaceChildren(node("p", error.message, "warning"));
+  }
+}
+
+async function refreshHistory(append = false) {
+  const version = ++state.simulationVersion;
+  const current = () => state.view === "history" && version === state.simulationVersion;
+  const list = $("#simulation-list");
+  const more = $("#simulation-history-more");
+  const params = new URLSearchParams({
+    q: $("#simulation-history-search").value.trim(), date: $("#simulation-history-date").value,
+  });
+  if (append && state.historyNext) params.set("before", state.historyNext);
+  else list.replaceChildren(node("p", "Loading trade history…", "quiet"));
+  more.disabled = true;
+  try {
+    const {runs, next} = await read(`/api/trade-history?${params}`);
+    if (!current()) return;
+    if (!append) list.replaceChildren();
+    if (!runs.length && !append) list.append(node("p", "No recorded runs match these filters.", "quiet"));
+    for (const run of runs) list.append(runButton(run, state.historyId, openHistoryRun, true));
+    state.historyNext = next;
+    more.hidden = !next;
+  } catch (error) {
+    if (current()) list.append(node("p", error.message, "warning"));
+  } finally {
+    if (current()) more.disabled = false;
+  }
+}
+
 async function refreshSimulations() {
   clearTimeout(state.simulationRefresh);
   const version = ++state.simulationVersion;
-  const stillCurrent = () => state.view === "simulation" && state.simulationVersion === version;
+  const view = state.view;
+  const stillCurrent = () => state.view === view && state.simulationVersion === version;
   const status = $("#simulation-status");
   const submit = $("#simulation-form button[type=submit]");
   try {
     const {runs} = await read("/api/simulations");
     if (!stillCurrent()) return;
     if (!state.simulationId || !runs.some(run => run.id === state.simulationId)) state.simulationId = runs[0]?.id;
-    const list = $("#simulation-list");
-    list.replaceChildren();
-    if (!runs.length) list.append(node("p", "No runs in this launch.", "quiet"));
-    for (const run of runs) {
-      const button = node("button", null, "slot history-slot");
-      button.type = "button";
-      button.setAttribute("aria-current", String(run.id === state.simulationId));
-      button.append(node("strong", `${run.request.symbol} · ${run.request.day}`),
-        node("span", `${run.request.market_time} ET · ${run.filled_orders} ${run.filled_orders === 1 ? "fill" : "fills"}`));
-      button.addEventListener("click", () => {
-        state.simulationId = run.id;
-        $("#simulation-audit").replaceChildren();
-        refreshSimulations();
-      });
-      list.append(button);
-    }
+    state.simulationRuns = runs;
+    renderSimulationList();
     submit.disabled = runs.some(run => activeRun(run.status));
     status.textContent = submit.disabled ? "Simulation in progress" : "";
     if (state.simulationId) {
@@ -1100,44 +655,46 @@ async function startSimulation(event) {
 function showSimulation() {
   showWorkspace("simulation");
   $("#title").textContent = "Historical simulation";
-  $("#run-description").textContent = "Replay a past market window with the trading council. History lasts until you stop the app.";
+  $("#run-description").textContent = "Replay a past market window with the trading council.";
+  $("#simulation-report").replaceChildren(node("h3", "Trade history"), node("p", "Run a simulation to see its orders, fills, and decisions here.", "quiet"));
   refreshSimulations();
 }
 
-for (const button of document.querySelectorAll("[data-window]")) {
-  button.addEventListener("click", () => {
-    state.window = Number(button.dataset.window);
-    for (const control of document.querySelectorAll("[data-window]")) control.setAttribute("aria-pressed", String(control === button));
-    if (state.detail) renderMarket();
-  });
+function showHistory() {
+  showWorkspace("history");
+  $("#title").textContent = "History";
+  $("#run-description").textContent = "Search recorded simulations and Alpaca paper orders by ticker, company, or trading date.";
+  state.historyId = null;
+  $("#simulation-report").replaceChildren(node("h3", "Trade history"), node("p", "Choose a recorded run to see its orders and available decisions.", "quiet"));
+  refreshHistory();
 }
 
-$("#data-mode").addEventListener("change", (event) => {
-  const latest = event.target.value === "latest";
-  for (const id of ["#date-field", "#time-field"]) {
-    const field = $(id);
-    field.hidden = latest;
-    field.querySelector("input").disabled = latest;
-  }
-  $("#mode-help").textContent = latest
-    ? "Uses the latest completed IEX minute candles during the regular session. Enter the shares you hold."
-    : "Enter holdings for this scenario. The paper account equity supplies the sizing reference.";
-});
-$("#analysis-form").addEventListener("submit", runAnalysis);
-$("#refresh-account").addEventListener("click", refreshAccount);
-$("#show-analysis").addEventListener("click", showAnalysis);
-$("#show-history").addEventListener("click", showHistory);
-$("#history-show-simulations").addEventListener("click", showSimulation);
-$("#history-search").addEventListener("input", renderHistoryList);
-$("#show-replay").addEventListener("click", showReplay);
 $("#show-simulation").addEventListener("click", showSimulation);
-for (const role of roles) $("#audit-query select").add(new Option(role, role));
-$("#show-audits").addEventListener("click", showAudits);
-$("#audit-query").addEventListener("submit", event => { event.preventDefault(); loadAudits(); });
-$("#audit-next").addEventListener("click", () => { if (nextAuditPage) loadAudits(nextAuditPage); });
+$("#show-history").addEventListener("click", showHistory);
+let historySearch;
+$("#simulation-history-filter").addEventListener("submit", event => {
+  event.preventDefault();
+  clearTimeout(historySearch);
+  refreshHistory();
+});
+$("#simulation-history-search").addEventListener("input", () => {
+  clearTimeout(historySearch);
+  state.simulationVersion += 1;
+  $("#simulation-history-more").hidden = true;
+  historySearch = setTimeout(() => { if (state.view === "history") refreshHistory(); }, 200);
+});
+$("#simulation-history-date").addEventListener("change", () => refreshHistory());
+$("#simulation-history-more").addEventListener("click", () => refreshHistory(true));
+$("#show-paper").addEventListener("click", showPaper);
+$("#paper-start").addEventListener("click", () => changePaper("start"));
+$("#paper-stop").addEventListener("click", () => changePaper("stop"));
+$("#paper-symbol").addEventListener("input", updatePaperSelection);
+$("#paper-holding").addEventListener("change", updatePaperSelection);
 $("#simulation-form").addEventListener("submit", startSimulation);
 $("#simulation-form").elements.holding_period.addEventListener("change", event => {
   $("#simulation-form").elements.max_hold_minutes.disabled = event.target.value === "overnight";
 });
-new ResizeObserver(drawCandles).observe($("#candles"));
-showSimulation();
+const workspaceQuery = new URLSearchParams(location.search);
+if (workspaceQuery.get("paper") === "1") showPaper();
+else if (workspaceQuery.get("history") === "1") showHistory();
+else showSimulation();
