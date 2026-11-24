@@ -48,7 +48,7 @@ class PaperPanel:
         return self.store.get_control(CONTROL_KEY) or {}
 
     def status(self):
-        from trader.marketdata.readiness import CAPTURE_HEALTH_KEY, capture_issue
+        from trader.marketdata.readiness import capture_issue
 
         session = self.session()
         clock = self.broker.clock()
@@ -64,7 +64,7 @@ class PaperPanel:
         active = permits_trading(session, now) and not held
         symbol = session.get("symbol")
         preparing = bool(active and clock.is_open and symbol and capture_issue(
-            self.store.get_control(CAPTURE_HEALTH_KEY), [symbol], now,
+            self.store, [symbol, self.cfg.benchmark], now, self.cfg.data_feed,
         ))
         return {
             "enabled": True,

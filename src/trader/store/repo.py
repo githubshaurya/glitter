@@ -92,8 +92,10 @@ def et_day_start_utc(now: datetime | None = None) -> datetime:
 
 
 class Store:
-    def __init__(self, url: str) -> None:
-        self.paper_panel_enabled = os.environ.get("TRADER_PAPER_UI_ENABLED", "").lower() == "true"
+    def __init__(self, url: str, *, paper_panel_enabled: bool | None = None) -> None:
+        if paper_panel_enabled is None:
+            paper_panel_enabled = os.environ.get("TRADER_PAPER_UI_ENABLED", "").lower() == "true"
+        self.paper_panel_enabled = paper_panel_enabled
         kwargs: dict[str, Any] = {"pool_pre_ping": True}
         if url.startswith("sqlite"):
             kwargs.update(connect_args={"check_same_thread": False, "timeout": 30})

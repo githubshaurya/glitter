@@ -30,6 +30,8 @@ from trader.store.repo import aware
 log = structlog.get_logger(__name__)
 _ACCOUNT_REFRESH = BoundedPool(2, "features-account")
 _ACCOUNT_READS = BoundedPool(8, "features-account-reads")
+# EMA21 requires 63 verified 15-minute buckets. Three prior regular sessions cover that warm-up.
+_LIVE_WARMUP_SESSIONS = 3
 
 
 def _two_sided(bid, ask):
@@ -330,16 +332,24 @@ class Collector:
                                                     now, feed=self.ctx.cfg.data_feed)
                         if statuses and "UNVERIFIED" not in statuses:
                             gap.status, gap.healed_at = "HEALED", now
-        # Live coverage first, then one historical session per pass. Every completed batch commits.
-        if sessions:
+        if sessions and (not self.realtime or aware(sessions[0].close) > now):
             newest = sessions[0]
             end = min(aware(newest.close), now.replace(second=0, microsecond=0))
-            start = max(aware(newest.open), end - timedelta(minutes=30))
+            opening = aware(newest.open)
+            start = max(opening, end - timedelta(minutes=30))
+            if self.realtime and any("UNVERIFIED" in self.fs.coverage(
+                symbol, opening, start, now, feed=self.ctx.cfg.data_feed,
+            ) for symbol in symbols):
+                start = opening
             self._bars(symbols, start, end, deadline)
-        for session in reversed(sessions):
+        closed = [session for session in sessions if aware(session.close) <= now]
+        warmup = closed[:_LIVE_WARMUP_SESSIONS] if self.realtime else []
+        attempted_warmup = False
+        for index, session in enumerate([*warmup, *reversed(closed[len(warmup):])]):
+            warming = index < len(warmup)
+            if deadline.expired() or (attempted_warmup and not warming):
+                break
             opening, closing = aware(session.open), aware(session.close)
-            if closing > now:
-                continue
             with self.ctx.store.session() as s:
                 unrecoverable = s.scalar(
                     select(Gap)
@@ -357,7 +367,9 @@ class Collector:
             if all("UNVERIFIED" not in self.fs.coverage(sym, opening, closing, now, feed=self.ctx.cfg.data_feed) for sym in symbols):
                 continue
             self._bars(symbols, opening, closing, deadline)
-            break
+            if not warming:
+                break
+            attempted_warmup = True
         if collect_news:
             news_started = utcnow()
             try:

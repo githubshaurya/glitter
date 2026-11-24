@@ -170,7 +170,7 @@ def open_feature_history(providers, workdir, sessions, symbols, feed, *, rolling
         return cache_dir / f"{digest([cache_scope, selected, revisions])}.db"
 
     def store_for_run():
-        return Store(f"sqlite:///{database.resolve().as_posix()}")
+        return Store(f"sqlite:///{database.resolve().as_posix()}", paper_panel_enabled=False)
 
     reusable, trim = 0, False
     with ReplayHistoryCache.open(directory, scope, feed) as shared:
