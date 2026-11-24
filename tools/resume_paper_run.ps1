@@ -19,7 +19,7 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
 }
 if (-not $ready) { throw 'Docker did not start within five minutes' }
 $deploymentFile = Join-Path $runDirectory 'deployment.env'
-$composeArgs = @('compose')
+$composeArgs = @('compose', '-f', 'compose.services.yml')
 if (Test-Path -LiteralPath $deploymentFile) {
     $composeArgs += @('--env-file', (Join-Path $repoPath '.env'), '--env-file', $deploymentFile)
 }

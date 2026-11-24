@@ -4,26 +4,26 @@ services:
   kafka:
     profiles: [kafka]
     extends:
-      file: docker-compose.yml
+      file: compose.services.yml
       service: kafka
     ports: !reset []
 
   postgres:
     extends:
-      file: docker-compose.yml
+      file: compose.services.yml
       service: postgres
     ports: !reset []
 
   kafka-init:
     profiles: [kafka]
     extends:
-      file: docker-compose.yml
+      file: compose.services.yml
       service: kafka-init
     volumes: !reset []
 
   migrate:
     extends:
-      file: docker-compose.yml
+      file: compose.services.yml
       service: migrate
     volumes: !reset []
 

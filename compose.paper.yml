@@ -16,8 +16,10 @@ services:
   paper-run:
     profiles: [paper-proof]
   paper-ui:
+    profiles: !reset []
     environment:
       <<: *paper-mode
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-true}
       TRADER_VIEWER_WARM_WORKERS: "1"
       TRADER_REPLAY_CACHE_DIR: /var/cache/glitter
       TRADER_USE_BUNDLED_MODEL_PROFILES: "true"
@@ -39,7 +41,10 @@ services:
       <<: *paper-mode
       TRADER_USE_BUNDLED_MODEL_PROFILES: "true"
   risk-gate-live: *paper-worker
-  executor-live: *paper-worker
+  executor-live:
+    environment:
+      <<: *paper-mode
+      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-true}
   order-events-live: *paper-worker
   journal: *paper-worker
   outbox: *paper-worker

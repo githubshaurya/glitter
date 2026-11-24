@@ -27,31 +27,15 @@ Install Docker Desktop or Docker Engine with Compose. From the cloned repository
 `.env.example` to `.env` and set `ALPACA_PAPER_KEY_ID`, `ALPACA_PAPER_SECRET_KEY`, and `GROQ_API_KEY`.
 
 ```sh
-docker compose -f compose.app.yml --profile kafka up --build -d --wait
+docker compose up --build -d --wait
 ```
 
-Open [localhost:8765](http://localhost:8765/). Compose starts the UI, PostgreSQL, and Kafka.
-In **Simulation**, choose a NASDAQ ticker, a past trading window with Alpaca SIP data, and a starting
-budget. Open a decision to review its evidence, council responses, and risk checks. Expand **STAR audit** to
-inspect its date, instrument, portfolio, and strategy, then filter the recorded role logs and review linked fills.
-The **History** tab searches recorded simulations and paper orders in the connected PostgreSQL
-database. History persists across container restarts while the PostgreSQL volume is retained.
+Open [localhost:8766](http://localhost:8766/). Compose starts the UI, PostgreSQL, Kafka, and the paper workers.
+The app includes a Groq model profile. Choose a tab in the browser.
 
-### Alpaca paper trading
-
-To launch the UI with both **Simulation** and **Paper trading**, use this command instead.
-Set `EXECUTION_ENABLED=true` in your local `.env` when you want to allow paper submissions.
-
-```sh
-docker compose -f docker-compose.yml -f compose.paper.yml --profile paper-ui up --build -d --wait
-```
-
-Open [Paper trading on localhost:8766](http://localhost:8766/?paper=1). Type a tradable U.S. stock or ETF ticker,
-choose **Intraday** or **Overnight allowed**, and click **Start paper trading** during the entry window.
-The council uses fresh data for the selected ticker, and approved orders go to Alpaca's paper account.
-**Stop new orders** disables entries and requests cancellation of resting buys. Keep the services
-running while the app manages any remaining positions. The launch includes PostgreSQL, Kafka, and the bundled
-Groq profile. To use a custom model configuration, create a local `config/llm_profiles.yaml`.
+- **Simulation** replays a past trading window using Alpaca SIP data. Choose a ticker, date, time, and virtual budget. Open a decision to see the evidence, council responses, risk checks, and simulated fills.
+- **Paper Trading** takes a tradable U.S. stock or ETF ticker and an **Intraday** or **Overnight allowed** holding policy. Click **Start paper trading** during the entry window to enable council-approved Alpaca paper orders. **Stop new orders** disables entries and requests cancellation of resting buys. Keep the app running while it manages any remaining positions.
+- **History** lets you find saved simulations and paper orders by ticker, company, or date. Records persist across container restarts while the PostgreSQL volume is retained.
 
 ## January 2026 council-only trade results
 

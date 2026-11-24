@@ -1,0 +1,6 @@
+name: glitter-paper
+
+include:
+  - path:
+      - compose.services.yml
+      - compose.paper.yml

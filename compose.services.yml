@@ -1,6 +1,6 @@
-# One command:   docker compose up -d --build
+# Service definitions for compose.yaml.
 #
-# Default stack = the live path (agent -> risk gate -> executor -> Alpaca PAPER) + Kafka + Postgres.
+# The live path is agent -> risk gate -> executor -> Alpaca PAPER, with Kafka and PostgreSQL.
 # Experiments are compose profiles:   docker compose --profile baseline --profile shadow up -d
 #   baseline  rule strategy on a 2nd Alpaca paper account (needs ALPACA_BASELINE_* in .env)   [experiment E1]
 #   shadow    second model on identical snapshots, simulated only (needs the profile in llm_profiles.yaml) [E2]
