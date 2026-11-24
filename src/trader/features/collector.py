@@ -1,6 +1,7 @@
 """Bounded broker ingestion. Only this code and FeatureWorker produce features."""
 
-from datetime import timedelta
+from collections import defaultdict
+from datetime import UTC, timedelta
 from decimal import Decimal
 from math import isfinite
 
@@ -32,6 +33,9 @@ _ACCOUNT_REFRESH = BoundedPool(2, "features-account")
 _ACCOUNT_READS = BoundedPool(8, "features-account-reads")
 # EMA21 requires 63 verified 15-minute buckets. Three prior regular sessions cover that warm-up.
 _LIVE_WARMUP_SESSIONS = 3
+# The SPY volatility ratio uses up to 20 earlier observations at the same exchange-local minute.
+_LIVE_REGIME_SESSIONS = 20
+_MIN_REGIME_SESSIONS = 15
 
 
 def _two_sided(bid, ask):
@@ -45,6 +49,8 @@ class Collector:
         self.rolling = rolling
         self.realtime = ctx.cfg.council_v2.bar_close_deadline_seconds is not None
         self._recent_repair_end = None
+        self._regime_warmup_end = None
+        self._regime_retry = None
         if self.realtime:
             self.worker = FeatureWorker(self.fs, ctx.cfg, publish_recent=False)
         else:
@@ -343,6 +349,8 @@ class Collector:
                 start = opening
             self._bars(symbols, start, end, deadline)
         closed = [session for session in sessions if aware(session.close) <= now]
+        if self.realtime and len(closed) >= _MIN_REGIME_SESSIONS and not deadline.expired():
+            self._warm_regime(closed[:_LIVE_REGIME_SESSIONS], now, deadline.child(20))
         warmup = closed[:_LIVE_WARMUP_SESSIONS] if self.realtime else []
         attempted_warmup = False
         for index, session in enumerate([*warmup, *reversed(closed[len(warmup):])]):
@@ -392,6 +400,36 @@ class Collector:
             self.worker.compute(utcnow())
         if not self.realtime:
             self.refresh(deadline)
+
+    def _warm_regime(self, sessions, now, deadline):
+        latest_close = aware(sessions[0].close)
+        if self._regime_warmup_end == latest_close:
+            return
+        if self._regime_retry and self._regime_retry[0] == latest_close and now < self._regime_retry[1]:
+            return
+        feed, benchmark = self.ctx.cfg.data_feed, self.ctx.cfg.benchmark
+        missing = [(aware(day.open), aware(day.close)) for day in sessions if "UNVERIFIED" in self.fs.coverage(
+            benchmark, aware(day.open), aware(day.close), now, feed=feed,
+        )]
+        if not missing:
+            self._regime_warmup_end = latest_close
+            return
+        symbols = sorted({benchmark, "SPY"})
+        try:
+            with request_budget(deadline):
+                bars = self.ctx.broker.bars_range(symbols, missing[-1][0], missing[0][1])
+        except Exception as exc:
+            log.warning("features.regime_warmup_failed", error_type=type(exc).__name__)
+            return
+        by_day = defaultdict(lambda: defaultdict(list))
+        for symbol in symbols:
+            for bar in bars.get(symbol, []):
+                by_day[bar.t.astimezone(UTC).date()][symbol].append(bar)
+        for start, end in missing:
+            self.fs.ingest_minutes(symbols, start, end, by_day[start.date()], utcnow(), feed=feed, revision_rank=0)
+        # A successful response may still omit sparse minutes. Let the regular repair path revisit them too.
+        self._regime_retry = (latest_close, now + timedelta(minutes=15))
+        log.info("features.regime_warmup_loaded", sessions=len(missing), benchmark=benchmark)
 
     def _bars(self, symbols, start, end, deadline):
         if start >= end:
